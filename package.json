@@ -16,6 +16,7 @@
     "client.js",
     "cordis.patch.yml",
     "ops/*.ps1",
+    "ops/*.mjs",
     "README.md",
     "LICENSE"
   ],

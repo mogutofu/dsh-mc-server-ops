@@ -158,6 +158,9 @@ export const name = 'mc-server-ops'
 export const inject = ['tools']
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
+// 跨平台的只读动作：Windows 上走 PowerShell（信息更全），其它平台走 Node 核心
+const NODE_RUNNER = join(SCRIPT_DIR, 'ops', 'rcon.mjs')
+const NODE_ACTIONS = new Set(['status', 'players', 'say', 'cmd', 'logs'])
 
 /** 插件配置：会完整渲染进 DSH 设置界面。 */
 export const Config = Schema.object({
@@ -322,7 +325,8 @@ export function apply(ctx, config) {
       const cli = ['-Action', action, '-Actor', actor]
       const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
       if (arg !== '') cli.push('-Arg', arg)
-      const result = await runMcAdmin(cli, 170000)
+      const useNode = process.platform !== 'win32' && NODE_ACTIONS.has(action) && existsSync(NODE_RUNNER)
+      const result = useNode ? await runNodeOps(action, arg, 60000) : await runMcAdmin(cli, 170000)
       if (isOwner(actor)) {
         grantTools(exec && exec.agent ? exec.agent.id : undefined)
       }
@@ -476,6 +480,33 @@ function ensureOpsScripts(bundledDir, targetDir) {
     if (need) { try { copyFileSync(src, dst) } catch { } }
   }
 }
+function runNodeOps(action, arg, timeoutMs) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      const argv = [NODE_RUNNER, '--dir', paths.serverDir, '--action', action]
+      if (arg !== undefined && arg !== null && String(arg) !== '') argv.push('--arg', String(arg))
+      child = spawn(process.execPath, argv, { windowsHide: true, cwd: paths.serverDir })
+    } catch (error) {
+      resolve({ ok: false, text: '无法启动 node: ' + (error && error.message ? error.message : String(error)) })
+      return
+    }
+    const chunks = []
+    const errChunks = []
+    const timer = setTimeout(() => { try { child.kill() } catch { } }, timeoutMs)
+    child.stdout.on('data', (d) => chunks.push(Buffer.from(d)))
+    child.stderr.on('data', (d) => errChunks.push(Buffer.from(d)))
+    child.on('error', (error) => { clearTimeout(timer); resolve({ ok: false, text: String(error && error.message ? error.message : error) }) })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const stdout = Buffer.concat(chunks).toString('utf8').trim()
+      const stderr = Buffer.concat(errChunks).toString('utf8').trim()
+      if (code === 0) resolve({ ok: true, text: stdout || '(无输出)' })
+      else resolve({ ok: false, text: stderr || stdout || ('退出码 ' + code) })
+    })
+  })
+}
+
 function readJsonBody(req) {
   return new Promise((resolve) => {
     const chunks = []

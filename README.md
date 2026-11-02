@@ -62,12 +62,13 @@ dsh-mc-server-ops/
 ├── index.js            # 插件宿主代码：mc_server 工具、权限守卫、人设注入
 ├── cordis.patch.yml    # 安装时自动插入的加载行
 └── ops/
+    ├── rcon.mjs             # 跨平台核心：RCON、进程探测、日志、状态汇总
     ├── mcadmin.ps1         # 运维入口（status/start/stop/投票/白名单…）
     ├── watchdog.ps1        # 看门狗：崩溃自动拉起
     └── server-console.ps1  # 带日志着色的服务器控制台
 ```
 
-首次运行时插件会把 `ops/*.ps1` 复制到 `<服务器目录>\ops\`，运行期数据（`bindings.json`、`votes.json`、`state.json`、`owners.json`）也生成在那里，**不会**写进本仓库。
+首次运行时插件会把 `ops/*.ps1` 复制到 `<服务器目录>\ops\`（`rcon.mjs` 留在包里直接调用，不复制），运行期数据（`bindings.json`、`votes.json`、`state.json`、`owners.json`）也生成在那里，**不会**写进本仓库。
 
 ## 功能开关（设置界面里逐项开关）
 
@@ -127,7 +128,7 @@ TPS 也是按服务端自动探测：`forge tps` → `tps`（Paper/Spigot）→ 
 
 ## 路线图 / 已知限制
 
-- **跨平台**：目前强依赖 Windows + PowerShell（`mcadmin.ps1`）。计划把 ops 层（RCON、进程探测、日志、启动）用 Node 重写，再让 PowerShell 版本只作为 Windows 的快速路径；在那之前，插件在 Linux/macOS 上只能做工具注册，跑不了运维动作。
+- **跨平台（进行中）**：查询类动作已抽到纯 Node 的 `ops/rcon.mjs`——`status` / `players` / `say` / `cmd` / `logs` 在 Linux、macOS 上直接可用（Windows 仍走 PowerShell，信息更全）。还没跨平台的是进程托管：`start` / `stop` / `restart` 依赖计划任务 + 看门狗窗口，Linux 上要补 systemd/nohup 那一层。
 - **投票超时**：已实现。`vote.timeoutMinutes`（默认 15）到点没凑够门槛会自动标成 `expired`，不再占「同时最多 3 个待确认投票」的名额。
 - **人设注入范围**：按会话 id 前缀判断（`session-*` 是本机界面），是启发式；如果 DSH 以后改会话 id 规则，这里要跟着调。
 
