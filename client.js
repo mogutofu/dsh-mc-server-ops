@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
 
 			async function load() {
 				try {
-					const res = await fetch(ENDPOINT, { cache: "no-store" })
+					const res = await fetch(ENDPOINT, { cache: "no-store", headers: { "x-mc-ops-client": "1" } })
 					const data = await res.json()
 					if (!res.ok) throw new Error(data.error || ("HTTP " + res.status))
 					const v = data.value || {}
@@ -98,7 +98,7 @@ window.__ModuleLoader__.load({
 				try {
 					const res = await fetch(ENDPOINT, {
 						method: "POST",
-						headers: { "content-type": "application/json" },
+						headers: { "content-type": "application/json", "x-mc-ops-client": "1" },
 						body: JSON.stringify(form),
 					})
 					const data = await res.json()

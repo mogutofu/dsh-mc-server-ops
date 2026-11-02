@@ -94,6 +94,9 @@ dsh-mc-server-ops/
 - 服主口令在 `owners.json` 里由本机生成，绑定口令写进 `ops\data\config.json`，都不外发。
 - 玩家默认只能读文件、跑只读命令；写文件、执行命令、联网下载需要服主授权（`ops.grantHours`）。
 - 发文件到群里时，`server.properties`、`ops\data\*`、密钥类文件一律拦截。
+- 设置面板的读写接口要求自定义请求头（浏览器会先发预检），跨站页面伪造不了；只改配置，不碰存档。
+- `export-data` / `import-data` 仅服主可用；导入时会拒绝含 `..` 或绝对路径的压缩包条目（防 zip slip）。
+- `cmd`（op/ban/kick 这类后台指令）在插件层就拦下非服主，不依赖脚本再判一次。
 
 ## 运行环境
 

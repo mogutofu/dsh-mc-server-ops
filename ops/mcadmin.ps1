@@ -827,6 +827,19 @@ switch ($Action) {
         $src = $Arg.Trim()
         if (-not [System.IO.Path]::IsPathRooted($src)) { $src = Join-Path $ServerDir $src }
         if (-not (Test-Path $src)) { throw "找不到文件：$src" }
+        # 防 zip slip：条目里带 .. 或绝对路径的直接拒绝
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($src)
+            $bad = @($zip.Entries | Where-Object {
+                $_.FullName -match '(^|[\\/])\.\.([\\/]|$)' -or $_.FullName.StartsWith('/') -or $_.FullName -match '^[a-zA-Z]:'
+            })
+            $zip.Dispose()
+            if ($bad.Count -gt 0) { throw '压缩包里有可疑路径（含 .. 或绝对路径），已拒绝导入。' }
+        }
+        catch {
+            if ($_.Exception.Message -like '*可疑路径*') { throw }
+        }
         New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
         Expand-Archive -Path $src -DestinationPath $DataDir -Force
         $result = "已从 $src 导入到 $DataDir（同名文件覆盖，其它保留）"

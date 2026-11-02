@@ -319,6 +319,10 @@ export function apply(ctx, config) {
       const actor = String((args && args.actor) || '').trim()
       if (!actor) throw new Error('mc_server: actor 不能为空（必须取自 [昵称 (ID)] 标记）')
       if (!isOwner(actor)) {
+        if (action === 'cmd') return { ok: false, text: '执行后台命令只有服主能做。' }
+        if (action === 'export-data' || action === 'import-data' || action === 'whitelist-sync' || action === 'bindings') {
+          return { ok: false, text: '这个操作只有服主能做。' }
+        }
         const denied = checkActionAllowed(action, currentPerms())
         if (denied) return { ok: false, text: denied }
       }
@@ -565,6 +569,10 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
       }, null, 2), 'utf8')
     } catch { }
 
+    // 只服务本机面板：带自定义头的请求浏览器会先发预检，跨站页面伪造不了
+    const isPanel = String(req.headers['x-mc-ops-client'] || '') === '1'
+    if (!isPanel) return send(403, { error: '只接受来自设置面板的请求' })
+
     if (req.method === 'GET') {
       if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings' })
       return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory' })
@@ -573,6 +581,11 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
 
     const body = await readJsonBody(req)
     if (!body) return send(400, { error: '请求体不是合法 JSON' })
+
+    const dirArg = body && body.server && typeof body.server.dir === 'string' ? body.server.dir.trim() : ''
+    if (dirArg && (/^[a-zA-Z]:[\\/]?$/.test(dirArg) || /^[\\/]+$/.test(dirArg))) {
+      return send(400, { error: '服务器目录不能填盘符根目录，请填具体目录（例如 D:\\server）。' })
+    }
 
     if (desc) {
       await settings.update(desc.ns, body, desc.revision)
