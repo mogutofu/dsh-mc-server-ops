@@ -126,7 +126,7 @@ const DESCRIPTION = [
   '',
   '玩家还能做：用 read / glob / grep 看服务器文件、用只读的 pwsh 命令查信息、用 qqbot_send_file 把普通文件发到群里（口令/密钥类文件除外）。',
   '玩家不能：改文件、删文件、新建文件、执行危险命令、设置创造模式。',
-  '- bind：绑定服主口令，arg 为口令，actor 为发送者在群里的 ID',
+  '- bind：用一次性口令把自己绑成服主。arg 为口令，actor 为发送者 ID，channel 必须填 c2c（只在私聊生效；群里发会被拒绝）。绑定成功后口令立即作废',
   '- bind-player：把游戏名绑定到当前 QQ（同时加入服务器白名单），arg 为游戏名（1-16 位字母/数字/下划线），一个 QQ 最多 10 个，一个游戏名最多被 3 个 QQ 绑定',
   '- unbind-player：解绑自己的某个游戏名（若该名字已无其它 QQ 绑定，同时移出白名单），arg 为游戏名',
   '- my-players：列出自己绑定的游戏名和在线状态（任何人可用）',
@@ -268,6 +268,7 @@ export function apply(ctx, config) {
   }
   // 启动时先落一份，保证脚本读到的是当前设置
   writeVoteConfig(opsDir, (config && config.vote) || null)
+  ensureOwnerSecret(opsDir)
   // 面板上刚保存的开关要立刻生效，所以每次都合并一次 liveConfig，而不是只用启动时读到的值。
   const currentPerms = () => Object.assign({}, perms, (liveConfig && liveConfig.permissions) || {})
 
@@ -303,6 +304,11 @@ export function apply(ctx, config) {
           type: 'string',
           description: 'say 的内容、cmd 的指令（不带斜杠）、bind 的口令，其它操作为空',
         },
+        channel: {
+          type: 'string',
+          enum: ['c2c', 'group', 'unknown'],
+          description: '当前对话类型：私聊填 c2c，群聊填 group。绑定服主口令只接受 c2c。',
+        },
         actor: {
           type: 'string',
           description: '发送者 ID：原样取自群消息开头的 [昵称 (ID)] 标记',
@@ -326,7 +332,7 @@ export function apply(ctx, config) {
         const denied = checkActionAllowed(action, currentPerms())
         if (denied) return { ok: false, text: denied }
       }
-      const cli = ['-Action', action, '-Actor', actor]
+      const cli = ['-Action', action, '-Actor', actor, '-Channel', String((args && args.channel) || 'unknown')]
       const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
       if (arg !== '') cli.push('-Arg', arg)
       const isWindows = process.platform === 'win32'
@@ -618,6 +624,25 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     send(500, { error: String(error && error.message ? error.message : error) })
   }
 }
+/** 第一次启动时生成一次性绑定口令，写到 ops\data\owner-code.txt（只在服务器本机可见）。 */
+function ensureOwnerSecret(opsPath) {
+  try {
+    const dataDir = join(opsPath, 'data')
+    mkdirSync(dataDir, { recursive: true })
+    const cfgFile = join(dataDir, 'config.json')
+    let cfg = {}
+    if (existsSync(cfgFile)) {
+      try { cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')) || {} } catch { cfg = {} }
+    }
+    if (!('ownerSecret' in cfg)) {
+      const code = (Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)).toUpperCase()
+      cfg.ownerSecret = code
+      writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), 'utf8')
+      writeFileSync(join(dataDir, 'owner-code.txt'), code, 'utf8')
+    }
+  } catch { }
+}
+
 /** 把投票门槛写到 ops\data\vote-config.json，脚本每次调用时读它。 */
 function writeVoteConfig(opsPath, voteCfg, fallback) {
   try {

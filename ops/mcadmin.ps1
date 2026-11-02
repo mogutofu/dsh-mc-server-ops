@@ -8,6 +8,7 @@
     [Alias('Lines')]
     [int]$TailLines = 40,
     [string]$ServerDir = '',
+    [string]$Channel = '',
     [switch]$Json
 )
 
@@ -913,21 +914,44 @@ stop/restart/cmd（含 op/ban/kick 等）仅服主可用。
 
     'bind' {
         if (-not $Arg) { throw 'USAGE: bind <口令>' }
-        if (-not $secret) { throw '尚未设置绑定口令' }
-        if ([string]::IsNullOrWhiteSpace($Actor)) { throw 'NO_ACTOR: 请在群聊里 @机器人 发送该指令。' }
-        if ($Arg.Trim() -ne $secret) { throw 'FORBIDDEN: 绑定口令错误。' }
+        if (-not $secret) { throw '绑定口令未启用或已经用过；需要再加服主请用 owner-add（仅服主可执行）。' }
+        if ([string]::IsNullOrWhiteSpace($Actor)) { throw 'NO_ACTOR: 无法识别发送者身份。' }
+        if ($Channel -ne 'c2c') {
+            throw 'FORBIDDEN: 绑定口令只能在【私聊】里发送，群里发等于公开口令。请私聊机器人发「绑定 <口令>」。'
+        }
+        $attemptFile = Join-Path $DataDir 'bind-attempts.json'
+        $attempts = @(Read-Json $attemptFile @())
+        $recent = @($attempts | Where-Object { $_.actor -eq $Actor -and ([datetime]$_.at) -gt (Get-Date).AddMinutes(-10) })
+        if ($recent.Count -ge 5) { throw '尝试次数过多，请 10 分钟后再试。' }
+        if ($Arg.Trim() -ne $secret) {
+            $attempts = @($attempts | Where-Object { ([datetime]$_.at) -gt (Get-Date).AddHours(-1) }) +
+                        @([pscustomobject]@{ actor = $Actor; at = (Get-Date).ToString('o') })
+            Write-Json $attemptFile $attempts
+            throw 'FORBIDDEN: 绑定口令错误。'
+        }
         if ($ownerIds -contains $Actor) {
             $result = "已经是服主: $Actor"
         }
         else {
             $ownerIds = @($ownerIds) + $Actor
             Write-Json $OwnerFile ([pscustomobject]@{ owners = $ownerIds; boundAt = (Get-Date).ToString('o') })
-            $result = "绑定成功，$Actor 已加入服主名单。"
+            # 一次性口令：绑完立刻作废，并清掉本机的口令文件
+            $cfg = Read-Json $ConfigFile ([pscustomobject]@{})
+            $cfg | Add-Member -Force -NotePropertyName ownerSecret -NotePropertyValue ''
+            Write-Json $ConfigFile $cfg
+            $codeFile = Join-Path $DataDir 'owner-code.txt'
+            if (Test-Path $codeFile) { Remove-Item $codeFile -Force -ErrorAction SilentlyContinue }
+            Remove-Item $attemptFile -Force -ErrorAction SilentlyContinue
+            $result = "绑定成功，$Actor 已加入服主名单。这个口令已经作废，其他人要加服主请用 owner-add。"
         }
     }
 
     'owner-add' {
-        Assert-Owner
+        # 引导：一个服主都没有时，只允许从本机（非群聊/非私聊）把自己加进去，否则永远没有服主
+        if (@($ownerIds).Count -gt 0) { Assert-Owner }
+        elseif ($Channel -eq 'group' -or $Channel -eq 'c2c') {
+            throw 'FORBIDDEN: 首次绑定服主请用私聊口令，或在服务器本机执行 owner-add。'
+        }
         if (-not $Arg) { throw 'USAGE: owner-add <id>' }
         if ($ownerIds -notcontains $Arg) { $ownerIds = @($ownerIds) + $Arg }
         Write-Json $OwnerFile ([pscustomobject]@{ owners = $ownerIds; boundAt = (Get-Date).ToString('o') })
