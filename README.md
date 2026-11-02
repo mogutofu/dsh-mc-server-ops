@@ -96,7 +96,23 @@ dsh-mc-server-ops/
 
 - Windows + PowerShell 5.1（脚本用 `powershell.exe -File` 调用）
 - Node.js ≥ 20（DSH 自带）
-- 服务器本体：Forge/Fabric 皆可，启动参数放在 `user_jvm_args.txt`，`win_args.txt` 由脚本自动探测
+
+**服务端不限类型**，插件只看端口、RCON 和进程，不假设你跑的是哪一家：
+
+| 类型 | 例子 | 识别方式 |
+| --- | --- | --- |
+| 插件服 | Paper / Spigot / Purpur / Folia / Leaves | 根目录 `*.jar` |
+| 模组服 | Forge / NeoForge / Fabric / Quilt | `libraries/**/win_args.txt` 或 `fabric-server-launch.jar` |
+| 混合服 | Arclight / Mohist / Cardboard / Youer / Banner | 走它自己的 `win_args.txt` 或启动 jar |
+| 原版 | vanilla `server.jar` | 根目录 `*.jar` |
+| 脚本启动 | 任意 `run.bat` | 前两者都没有时兜底执行 |
+
+启动顺序：`libraries/**/win_args.txt` → 优先的 loader jar（fabric/quilt）→ 根目录最新 `*.jar` → `run.bat`。
+内存和 JVM 参数：存在 `user_jvm_args.txt` 就自动带上（`@user_jvm_args.txt`），否则用服务端默认。
+
+TPS 也是按服务端自动探测：`forge tps` → `tps`（Paper/Spigot）→ `spark tps` → `carpet tps`，都没有就显示 `-`，不影响其它状态项。
+
+需要强制指定时可以设环境变量：`MC_JAR`（指定 jar）、`MC_JVM_ARGS`（覆盖 JVM 参数）、`MC_LAUNCH_ARGS`（覆盖整条启动参数）、`MC_SERVER_DIR`（服务器目录）。
 
 ## License
 

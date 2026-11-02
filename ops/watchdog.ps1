@@ -45,7 +45,7 @@ function Get-ServerProcess {
 function Start-Server {
     $java = Join-Path $ServerDir 'java\bin\java.exe'
     $consoleScript = Join-Path $OpsDir 'server-console.ps1'
-    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $consoleScript -WorkingDirectory $ServerDir -WindowStyle Normal -PassThru
+    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $consoleScript, '-ServerDir', $ServerDir) -WorkingDirectory $ServerDir -WindowStyle Normal -PassThru
     Start-Sleep -Seconds 3
     $javaProc = Get-ServerProcess
     if ($javaProc) { $javaProc.Id | Set-Content $PidFile -Encoding ASCII }

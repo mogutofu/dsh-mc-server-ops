@@ -253,6 +253,26 @@ function Get-CleanLog([int]$count) {
     return ($kept -join [Environment]::NewLine)
 }
 
+$WatchdogTask = 'CBC-Server-Watchdog'
+
+# 有计划的看门狗任务就拉起任务，没有（别的机器上没配过）就直接起 watchdog.ps1
+function Start-Watchdog {
+    $taskExists = $false
+    try {
+        schtasks /Query /TN $WatchdogTask *> $null
+        $taskExists = ($LASTEXITCODE -eq 0)
+    } catch { }
+    if ($taskExists) {
+        try { schtasks /Run /TN $WatchdogTask *> $null } catch { }
+        return
+    }
+    $wdScript = Join-Path $OpsDir 'watchdog.ps1'
+    if (-not (Test-Path $wdScript)) { return }
+    try {
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $wdScript, '-ServerDir', $ServerDir) -WindowStyle Hidden | Out-Null
+    } catch { }
+}
+
 function Start-McServer {
     $proc = Get-ServerProcess
     if ($proc) { return "already running (pid $($proc.Id))" }
@@ -268,7 +288,7 @@ function Start-McServer {
         $wid = (Get-Content $wpidFile -Raw).Trim()
         if ($wid -match '^\d+$' -and (Get-Process -Id ([int]$wid) -ErrorAction SilentlyContinue)) { $wdAlive = $true }
     }
-    if (-not $wdAlive) { try { schtasks /Run /TN 'CBC-Server-Watchdog' 2>&1 | Out-Null } catch { } }
+    if (-not $wdAlive) { Start-Watchdog }
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
@@ -350,10 +370,9 @@ function Get-StatusText {
                 if ($Matches[3].Trim()) { $players = $players + ' (' + $Matches[3].Trim() + ')' }
             }
         } catch { }
-        try {
-            $t = Invoke-Rcon 'forge tps' 4000
-            if ($t -match 'Mean TPS:\s*([\d.]+)') { $tps = $Matches[1] }
-        } catch { }
+        $tpsProbe = Get-ServerTps
+        if ($null -ne $tpsProbe) { $tps = $tpsProbe }
+
     }
 
     $difficulty = '-'; $port = '35942'
@@ -410,6 +429,24 @@ function Assert-StartCooldown {
     Write-Json (Get-RateFile) $rl
 }
 
+function Get-ServerTps {
+    # 不同服务端 TPS 命令不一样：Forge/NeoForge=forge tps，Paper/Spigot= tps，Fabric(Carpet)=carpet tps，spark=spark tps
+    $probes = @(
+        @{ cmd = 'forge tps'; re = 'Mean TPS:\s*([\d.]+)' },
+        @{ cmd = 'tps'; re = 'TPS[^\d]*([\d.]+)' },
+        @{ cmd = 'spark tps'; re = 'TPS[^\d]*([\d.]+)' },
+        @{ cmd = 'carpet tps'; re = 'TPS[^\d]*([\d.]+)' }
+    )
+    foreach ($p in $probes) {
+        try {
+            $out = Invoke-Rcon $p.cmd 3000
+            if ($out -and ($out -match $p.re)) { return [double]$Matches[1] }
+        }
+        catch { }
+    }
+    return $null
+}
+
 function Get-ServerHealth {
     $proc = Get-ServerProcess
     if (-not $proc) {
@@ -430,8 +467,8 @@ function Get-ServerHealth {
         }
         return [pscustomobject]@{ state = 'unresponsive'; tps = $null; rcon = $false; pid = $proc.Id; detail = 'RCON 无响应，疑似假死' }
     }
-    $tps = $null
-    try { $t = Invoke-Rcon 'forge tps' 4000; if ($t -match 'Mean TPS:\s*([\d.]+)') { $tps = [double]$Matches[1] } } catch { }
+    $tps = Get-ServerTps
+
     if ($null -ne $tps -and $tps -lt 3) {
         return [pscustomobject]@{ state = 'lagging'; tps = $tps; rcon = $true; pid = $proc.Id; detail = "TPS $tps，严重卡顿" }
     }
