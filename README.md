@@ -128,7 +128,7 @@ TPS 也是按服务端自动探测：`forge tps` → `tps`（Paper/Spigot）→ 
 
 ## 路线图 / 已知限制
 
-- **跨平台（进行中）**：查询类动作已抽到纯 Node 的 `ops/rcon.mjs`——`status` / `players` / `say` / `cmd` / `logs` 在 Linux、macOS 上直接可用（Windows 仍走 PowerShell，信息更全）。还没跨平台的是进程托管：`start` / `stop` / `restart` 依赖计划任务 + 看门狗窗口，Linux 上要补 systemd/nohup 那一层。
+- **跨平台**：核心已抽到纯 Node 的 `ops/rcon.mjs`。`status` / `players` / `say` / `cmd` / `logs` / `start` / `stop` / `restart` 在 Linux、macOS 上直接可用（Windows 仍走 PowerShell，CPU 等指标更全）。还剩投票、白名单、绑定、KubeJS 这些写数据的动作只在 Windows 上；在别的平台调用会明确提示，而不是报 PowerShell 找不到。
 - **投票超时**：已实现。`vote.timeoutMinutes`（默认 15）到点没凑够门槛会自动标成 `expired`，不再占「同时最多 3 个待确认投票」的名额。
 - **人设注入范围**：按会话 id 前缀判断（`session-*` 是本机界面），是启发式；如果 DSH 以后改会话 id 规则，这里要跟着调。
 

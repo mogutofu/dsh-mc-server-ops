@@ -160,7 +160,7 @@ export const inject = ['tools']
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 // 跨平台的只读动作：Windows 上走 PowerShell（信息更全），其它平台走 Node 核心
 const NODE_RUNNER = join(SCRIPT_DIR, 'ops', 'rcon.mjs')
-const NODE_ACTIONS = new Set(['status', 'players', 'say', 'cmd', 'logs'])
+const NODE_ACTIONS = new Set(['status', 'players', 'say', 'cmd', 'logs', 'start', 'stop', 'restart'])
 
 /** 插件配置：会完整渲染进 DSH 设置界面。 */
 export const Config = Schema.object({
@@ -325,7 +325,11 @@ export function apply(ctx, config) {
       const cli = ['-Action', action, '-Actor', actor]
       const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
       if (arg !== '') cli.push('-Arg', arg)
-      const useNode = process.platform !== 'win32' && NODE_ACTIONS.has(action) && existsSync(NODE_RUNNER)
+      const isWindows = process.platform === 'win32'
+      if (!isWindows && !NODE_ACTIONS.has(action)) {
+        return { ok: false, text: `（${process.platform}）${action} 还没跨平台，目前只在 Windows 上可用。跨平台可用的是：${[...NODE_ACTIONS].join(' / ')}` }
+      }
+      const useNode = !isWindows && NODE_ACTIONS.has(action) && existsSync(NODE_RUNNER)
       const result = useNode ? await runNodeOps(action, arg, 60000) : await runMcAdmin(cli, 170000)
       if (isOwner(actor)) {
         grantTools(exec && exec.agent ? exec.agent.id : undefined)

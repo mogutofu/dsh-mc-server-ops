@@ -9,10 +9,11 @@
  *   node rcon.mjs --dir <服务器目录> --action logs --arg 50
  *   node rcon.mjs --dir <服务器目录> --action say --arg "hello"
  *   node rcon.mjs --dir <服务器目录> --action cmd --arg "list"
+ *   node rcon.mjs --dir <服务器目录> --action start|stop|restart [--dry-run]
  */
 import { createConnection } from 'node:net'
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 function parseArgs(argv) {
@@ -97,12 +98,40 @@ function rconCall(port, password, command, timeoutMs) {
   })
 }
 
-function findJava(serverDir) {
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function looksLikeJava(pid) {
   try {
     if (process.platform === 'win32') {
-      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq java.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8' })
-      const m = /"java\.exe","(\d+)"/i.exec(out)
-      if (m) return Number(m[1])
+      const out = execFileSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { encoding: 'utf8' })
+      return /java\.exe/i.test(out)
+    }
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('java')
+  } catch { return false }
+}
+
+function findJava(serverDir) {
+  // 1) 先信 pid 文件（我们自己写的那条），能避免多开时认错进程
+  try {
+    const f = join(serverDir, 'ops', 'data', 'server.pid')
+    if (existsSync(f)) {
+      const pid = Number(readFileSync(f, 'utf8').trim())
+      if (pid > 0 && pidAlive(pid) && looksLikeJava(pid)) return pid
+    }
+  } catch { }
+  // 2) 按命令行匹配服务器目录
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('wmic', ['process', 'where', "name='java.exe'", 'get', 'ProcessId,CommandLine', '/format:csv'], { encoding: 'utf8' })
+      const want = serverDir.replace(/\\+$/, '').toLowerCase()
+      for (const line of out.split(/\r?\n/)) {
+        if (!line || !/java\.exe/i.test(line)) continue
+        const m = /,(\d+)\s*$/.exec(line)
+        if (!m) continue
+        if (line.toLowerCase().includes(want)) return Number(m[1])
+      }
       return null
     }
     const entries = readdirSync('/proc').filter((n) => /^\d+$/.test(n))
@@ -116,7 +145,6 @@ function findJava(serverDir) {
   } catch { }
   return null
 }
-
 function processInfo(pid) {
   const info = { pid, rssKB: null, uptimeSec: null }
   if (!pid) return info
@@ -185,6 +213,98 @@ async function tps(rcon) {
   return null
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function dataDir(dir) { return join(dir, 'ops', 'data') }
+function pidFile(dir) { return join(dataDir(dir), 'server.pid') }
+
+function walkFind(root, name) {
+  const stack = [root]
+  while (stack.length) {
+    const cur = stack.pop()
+    let list
+    try { list = readdirSync(cur, { withFileTypes: true }) } catch { continue }
+    for (const e of list) {
+      const p = join(cur, e.name)
+      if (e.isDirectory()) stack.push(p)
+      else if (e.name === name) return p
+    }
+  }
+  return null
+}
+
+function javaExecutable(dir) {
+  const p = join(dir, 'java', 'bin', process.platform === 'win32' ? 'java.exe' : 'java')
+  return existsSync(p) ? p : 'java'
+}
+
+/** 和服务端类型无关的启动目标探测：forge 参数文件 → loader jar → 根目录 jar → 启动脚本 */
+function detectLaunch(dir) {
+  const isWin = process.platform === 'win32'
+  const javaExe = javaExecutable(dir)
+  const jvm = existsSync(join(dir, 'user_jvm_args.txt')) ? ['@user_jvm_args.txt'] : []
+  const lib = join(dir, 'libraries')
+  if (existsSync(lib)) {
+    const found = walkFind(lib, isWin ? 'win_args.txt' : 'unix_args.txt')
+    if (found) {
+      const rel = '@' + found.slice(dir.length + 1).split('\\').join('/')
+      return { javaExe, args: [...jvm, rel, 'nogui'], desc: 'forge args: ' + rel }
+    }
+  }
+  for (const name of ['fabric-server-launch.jar', 'fabric-server-launcher.jar', 'quilt-server-launch.jar']) {
+    const p = join(dir, name)
+    if (existsSync(p)) return { javaExe, args: [...jvm, '-jar', p, 'nogui'], desc: 'jar: ' + name }
+  }
+  try {
+    const jars = readdirSync(dir)
+      .filter((n) => n.toLowerCase().endsWith('.jar') && !/installer|shim|sources|javadoc/i.test(n))
+      .map((n) => ({ n, t: statSync(join(dir, n)).mtimeMs }))
+      .sort((a, b) => b.t - a.t)
+    if (jars.length) return { javaExe, args: [...jvm, '-jar', join(dir, jars[0].n), 'nogui'], desc: 'jar: ' + jars[0].n }
+  } catch { }
+  const script = isWin ? 'run.bat' : 'run.sh'
+  if (existsSync(join(dir, script))) return { javaExe: script, args: [], desc: script, isScript: true }
+  return null
+}
+
+async function doStart(dir, dryRun) {
+  const running = findJava(dir)
+  if (running) return `服务器已经在运行（pid ${running}）`
+  const launch = detectLaunch(dir)
+  if (!launch) throw new Error('没有找到启动目标：libraries 参数文件、*.jar、run.sh 都不存在')
+  if (dryRun) return '[dry-run] ' + launch.javaExe + ' ' + launch.args.join(' ')
+  mkdirSync(join(dir, 'logs'), { recursive: true })
+  mkdirSync(dataDir(dir), { recursive: true })
+  if (launch.isScript) {
+    const child = spawn(launch.javaExe, [], { cwd: dir, detached: true, stdio: 'ignore', shell: true })
+    child.unref()
+    writeFileSync(pidFile(dir), String(child.pid), 'utf8')
+    return `已通过 ${launch.desc} 启动（pid ${child.pid}）`
+  }
+  const logFd = openSync(join(dir, 'logs', 'console.log'), 'a')
+  const child = spawn(launch.javaExe, launch.args, { cwd: dir, detached: true, stdio: ['ignore', logFd, logFd] })
+  child.unref()
+  writeFileSync(pidFile(dir), String(child.pid), 'utf8')
+  return `已启动（pid ${child.pid}，${launch.desc}），加载约 40 秒`
+}
+
+async function doStop(dir, call, waitSec = 90) {
+  const pid = findJava(dir)
+  if (!pid) return '服务器没在运行'
+  let asked = false
+  try { await call('stop', 3000); asked = true } catch { }
+  const deadline = Date.now() + waitSec * 1000
+  while (Date.now() < deadline) {
+    await sleep(1000)
+    if (!findJava(dir)) return asked ? '已停止（RCON stop）' : '已停止'
+  }
+  // 强杀之前再确认一次：这个 pid 必须仍然属于本服务器目录，防止误杀别的 Java 进程
+  if (findJava(dir) !== pid) return '已停止'
+  try { process.kill(pid) } catch { }
+  await sleep(1500)
+  return findJava(dir) ? '已强制结束进程（超时）' : '已停止'
+}
+
 async function main() {
   const { dir, action, arg } = parseArgs(process.argv.slice(2))
   const props = readProperties(dir)
@@ -249,6 +369,20 @@ async function main() {
       `地图: ${world}  磁盘剩余: ${free === null ? '-' : (free / 1024 / 1024 / 1024).toFixed(1) + ' GB'}`,
       `难度: ${props['difficulty'] || '-'}  端口: ${props['server-port'] || '-'}`,
     ].join('\n'))
+    return
+  }
+  if (action === 'start') {
+    process.stdout.write(await doStart(dir, process.argv.includes('--dry-run')))
+    return
+  }
+  if (action === 'stop') {
+    process.stdout.write(await doStop(dir, call))
+    return
+  }
+  if (action === 'restart') {
+    const stopped = await doStop(dir, call)
+    const started = await doStart(dir, process.argv.includes('--dry-run'))
+    process.stdout.write(stopped + '；' + started)
     return
   }
   throw new Error('未知 action: ' + action)
