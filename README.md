@@ -117,6 +117,18 @@ TPS 也是按服务端自动探测：`forge tps` → `tps`（Paper/Spigot）→ 
 
 需要强制指定时可以设环境变量：`MC_JAR`（指定 jar）、`MC_JVM_ARGS`（覆盖 JVM 参数）、`MC_LAUNCH_ARGS`（覆盖整条启动参数）、`MC_SERVER_DIR`（服务器目录）。
 
+## 进程检测（多层降级）
+
+状态里的「运行」按下面这个顺序判断，任何一层可用就行，并在输出里标明用了哪层：
+
+1. `ops\data\server.pid` + `tasklist` 校验进程名（最准，能拿到 pid）
+2. 命令行匹配服务器目录：`wmic` → PowerShell `Get-CimInstance` → Linux `/proc`
+3. 端口探测：直接连 `server-port`（默认 25565），能连上就认为服务活着
+
+输出示例：`pid: 7544（pidfile）`、`pid: -（端口探测）`。两层都拿不到才算「未运行」，不会静默误报。
+
+没有引入第三方原生进程模块（`windows-process-tree` 这类）：它们要按 Node ABI 预编译、随 Node 升级失效，供应链风险也高；端口探测已经能在「wmic 被移除 + pid 文件丢失」这种极端情况下给出正确判断。
+
 ## 数据迁移
 
 运行期数据都在 `<服务器目录>\ops\data\`（绑定、投票、服主名单、口令、投票门槛）。换机器或换目录时用两个工具动作搬运：

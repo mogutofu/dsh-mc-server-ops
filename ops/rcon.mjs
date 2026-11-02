@@ -112,38 +112,87 @@ function looksLikeJava(pid) {
   } catch { return false }
 }
 
+/** 端口能不能连上：比「找进程」更贴近「服务是不是活着」，且不依赖任何外部命令 */
+function probePort(port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    let done = false
+    const socket = createConnection({ host: '127.0.0.1', port })
+    const finish = (ok) => {
+      if (done) return
+      done = true
+      try { socket.destroy() } catch { }
+      resolve(ok)
+    }
+    socket.setTimeout(timeoutMs, () => finish(false))
+    socket.on('connect', () => finish(true))
+    socket.on('error', () => finish(false))
+  })
+}
+
+function matchByCommandLine(dir) {
+  const want = dir.replace(/[\\/]+$/, '').toLowerCase()
+  // 1) wmic（老系统，可能已被移除）
+  if (!process.env.MC_OPS_NO_WMIC) {
+    try {
+      const out = execFileSync('wmic', ['process', 'where', "name='java.exe'", 'get', 'ProcessId,CommandLine', '/format:csv'], { encoding: 'utf8' })
+      for (const line of out.split(/\r?\n/)) {
+        if (!line || !/java\.exe/i.test(line)) continue
+        if (!line.toLowerCase().includes(want)) continue
+        const m = /,(\d+)\s*$/.exec(line)
+        if (m) return { pid: Number(m[1]), via: 'wmic' }
+      }
+      return null
+    } catch { }
+  }
+  // 2) CIM（Windows 10/Server 2019+ 都有 PowerShell）
+  if (process.platform === 'win32') {
+    try {
+      const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='java.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"], { encoding: 'utf8', timeout: 8000 })
+      const data = JSON.parse(out || '[]')
+      const list = Array.isArray(data) ? data : [data]
+      for (const item of list) {
+        const cmd = String(item.CommandLine || '').toLowerCase()
+        if (cmd.includes(want)) return { pid: Number(item.ProcessId), via: 'cim' }
+      }
+    } catch { }
+    return null
+  }
+  // 3) Linux / macOS：/proc
+  try {
+    for (const pid of readdirSync('/proc').filter((n) => /^\d+$/.test(n))) {
+      let cmd = ''
+      try { cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8') } catch { continue }
+      if (cmd.includes('java') && cmd.includes(want)) return { pid: Number(pid), via: 'proc' }
+    }
+  } catch { }
+  return null
+}
+
+/**
+ * 服务是否在跑：pid 文件 → 命令行匹配（wmic/CIM/proc）→ 端口探测。
+ * 返回 via 说明用了哪一层，方便在状态里如实报告。
+ */
 function findJava(serverDir) {
-  // 1) 先信 pid 文件（我们自己写的那条），能避免多开时认错进程
+  return detectServer(serverDir).pid
+}
+
+let lastDetect = null
+function detectServer(serverDir) {
   try {
     const f = join(serverDir, 'ops', 'data', 'server.pid')
     if (existsSync(f)) {
       const pid = Number(readFileSync(f, 'utf8').trim())
-      if (pid > 0 && pidAlive(pid) && looksLikeJava(pid)) return pid
-    }
-  } catch { }
-  // 2) 按命令行匹配服务器目录
-  try {
-    if (process.platform === 'win32') {
-      const out = execFileSync('wmic', ['process', 'where', "name='java.exe'", 'get', 'ProcessId,CommandLine', '/format:csv'], { encoding: 'utf8' })
-      const want = serverDir.replace(/\\+$/, '').toLowerCase()
-      for (const line of out.split(/\r?\n/)) {
-        if (!line || !/java\.exe/i.test(line)) continue
-        const m = /,(\d+)\s*$/.exec(line)
-        if (!m) continue
-        if (line.toLowerCase().includes(want)) return Number(m[1])
+      if (pid > 0 && pidAlive(pid) && looksLikeJava(pid)) {
+        lastDetect = { pid, via: 'pidfile' }
+        return lastDetect
       }
-      return null
-    }
-    const entries = readdirSync('/proc').filter((n) => /^\d+$/.test(n))
-    for (const pid of entries) {
-      let cmd = ''
-      try { cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8') } catch { continue }
-      if (!cmd.includes('java')) continue
-      if (!cmd.includes(serverDir.replace(/\/+$/, ''))) continue
-      return Number(pid)
     }
   } catch { }
-  return null
+  const matched = matchByCommandLine(serverDir)
+  if (matched) { lastDetect = matched; return matched }
+  lastDetect = { pid: null, via: 'none' }
+  return lastDetect
 }
 function processInfo(pid) {
   const info = { pid, rssKB: null, uptimeSec: null }
@@ -268,8 +317,12 @@ function detectLaunch(dir) {
 }
 
 async function doStart(dir, dryRun) {
-  const running = findJava(dir)
-  if (running) return `服务器已经在运行（pid ${running}）`
+  const detected = detectServer(dir)
+  const port = Number(readProperties(dir)['server-port'] || 25565)
+  const portOpen = await probePort(port)
+  if (detected.pid || portOpen) {
+    return `服务器已经在运行（pid ${detected.pid || '-'}，检测方式 ${detected.via}${portOpen ? ' + 端口' : ''}）`
+  }
   const launch = detectLaunch(dir)
   if (!launch) throw new Error('没有找到启动目标：libraries 参数文件、*.jar、run.sh 都不存在')
   if (dryRun) return '[dry-run] ' + launch.javaExe + ' ' + launch.args.join(' ')
@@ -289,8 +342,13 @@ async function doStart(dir, dryRun) {
 }
 
 async function doStop(dir, call, waitSec = 90) {
-  const pid = findJava(dir)
-  if (!pid) return '服务器没在运行'
+  const detected = detectServer(dir)
+  const pid = detected.pid
+  const port = Number(readProperties(dir)['server-port'] || 25565)
+  if (!pid) {
+    if (await probePort(port)) return '服务在跑，但找不到对应进程（可能是权限不足或检测方式不可用），没有进程可以停；请在服务器控制台手动关。'
+    return '服务器没在运行'
+  }
   let asked = false
   try { await call('stop', 3000); asked = true } catch { }
   const deadline = Date.now() + waitSec * 1000
@@ -333,28 +391,43 @@ async function main() {
     return
   }
   if (action === 'status') {
-    const pid = findJava(dir)
+    const detected = detectServer(dir)
+    const pid = detected.pid
+    const port = Number(props['server-port'] || 25565)
+    const portOpen = await probePort(port)
+    const running = !!pid || portOpen
     const info = processInfo(pid)
-    const running = !!pid
     let health = 'stopped'
     let online = '-'
     let tpsValue = null
     if (running) {
-      let rconOk = false
-      try { await call('list', 3000); rconOk = true } catch { }
-      if (!rconOk) {
-        health = info.uptimeSec !== null && info.uptimeSec < 180 ? 'booting' : 'unresponsive'
+      if (!enabled) {
+        health = 'running'
       } else {
-        tpsValue = await tps(call)
-        health = tpsValue !== null && tpsValue < 3 ? 'lagging' : 'healthy'
-        try {
-          const list = await call('list')
-          const m = /There are (\d+) of a max of (\d+) players online/.exec(list || '')
-          if (m) online = m[1] + '/' + m[2]
-        } catch { }
+        let rconOk = false
+        try { await call('list', 3000); rconOk = true } catch { }
+        if (!rconOk) {
+          health = info.uptimeSec !== null && info.uptimeSec < 180 ? 'booting' : 'unresponsive'
+        } else {
+          tpsValue = await tps(call)
+          health = tpsValue !== null && tpsValue < 3 ? 'lagging' : 'healthy'
+          try {
+            const list = await call('list')
+            const m = /There are (\d+) of a max of (\d+) players online/.exec(list || '')
+            if (m) online = m[1] + '/' + m[2]
+          } catch { }
+        }
       }
     }
-    const healthText = { stopped: '未运行', booting: '启动中', healthy: '正常', lagging: '严重卡顿', unresponsive: '无响应（假死）' }[health]
+    const healthText = {
+      stopped: '未运行',
+      booting: '启动中',
+      healthy: '正常',
+      running: '运行中（未启用 RCON）',
+      lagging: '严重卡顿',
+      unresponsive: '无响应（假死）',
+    }[health]
+    const viaText = pid ? detected.via : (portOpen ? '端口探测' : detected.via)
     const mem = info.rssKB ? (info.rssKB / 1024).toFixed(0) + ' MB' : '-'
     const free = diskFree(dir)
     let world = '-'
@@ -363,15 +436,14 @@ async function main() {
       try { world = (dirSizeBytes(worldDir) / 1024 / 1024).toFixed(0) + ' MB' } catch { }
     }
     process.stdout.write([
-      `运行: ${running ? 'yes' : 'no'}  健康: ${healthText}  pid: ${pid || '-'}  在线: ${online}`,
+      `运行: ${running ? 'yes' : 'no'}  健康: ${healthText}  pid: ${pid || '-'}（${viaText}）  在线: ${online}`,
       `内存: ${mem}  运行时长: ${formatUptime(info.uptimeSec)}`,
       `TPS: ${tpsValue === null ? '-' : tpsValue.toFixed(3)}`,
       `地图: ${world}  磁盘剩余: ${free === null ? '-' : (free / 1024 / 1024 / 1024).toFixed(1) + ' GB'}`,
       `难度: ${props['difficulty'] || '-'}  端口: ${props['server-port'] || '-'}`,
     ].join('\n'))
     return
-  }
-  if (action === 'start') {
+  }  if (action === 'start') {
     process.stdout.write(await doStart(dir, process.argv.includes('--dry-run')))
     return
   }
