@@ -138,6 +138,18 @@ function Enable-Whitelist {
     }
 }
 
+$VoteConfigFile = Join-Path $DataDir 'vote-config.json'
+$VoteApproveNeed = 2
+$VoteRejectNeed = 1
+try {
+    if (Test-Path $VoteConfigFile) {
+        $vc = Get-Content $VoteConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($vc.approveNeed) { $VoteApproveNeed = [Math]::Max(1, [int]$vc.approveNeed) }
+        if ($vc.rejectNeed) { $VoteRejectNeed = [Math]::Max(1, [int]$vc.rejectNeed) }
+    }
+}
+catch { }
+
 function Get-Votes {
     $doc = Read-Json $VoteFile @()
     $list = @()
@@ -699,7 +711,7 @@ switch ($Action) {
         $all += [pscustomobject]@{
             id        = $id
             desc      = $Arg.Trim()
-            need      = 2
+            need      = $VoteApproveNeed
             votes     = @()
             rejects   = @()
             status    = 'open'
@@ -707,7 +719,7 @@ switch ($Action) {
             expiresAt = (Get-Date).AddMinutes(15).ToString('o')
         }
         Save-Votes $all
-        $result = '投票已发起，编号 ' + $id + '。需要至少 2 位群友回复「同意 ' + $id + '」才会放行；凑够 2 票之前只要有人回复「拒绝 ' + $id + '」，这次就不授权了。'
+        $result = '投票已发起，编号 ' + $id + '。需要 ' + $VoteApproveNeed + ' 位群友回复「同意 ' + $id + '」才会放行；' + $(if ($VoteRejectNeed -le 1) { '凑够 ' + $VoteApproveNeed + ' 票之前只要有人回复「拒绝 ' + $id + '」，这次就不授权了。' } else { '凑够 ' + $VoteApproveNeed + ' 票之前有 ' + $VoteRejectNeed + ' 人回复「拒绝 ' + $id + '」，这次就不授权了。' })
     }
 
     'vote-approve' {
@@ -756,11 +768,24 @@ switch ($Action) {
             $result = '这个投票已经过期了，不算数，重新发起吧。'
         }
         else {
-            $vote.rejects = @($vote.rejects) + @([pscustomobject]@{ qq = $Actor; at = (Get-Date).ToString('o') })
-            $vote.status = 'rejected'
-            $approved = @($vote.votes).Count
-            Save-Votes $all
-            $result = "编号 $id 已被否决：$($vote.desc)。刚才只有 $approved/$($vote.need) 票同意，这次不授权了，谁再点同意也不算，要动手得重新发起投票。"
+            $already = @($vote.rejects | ForEach-Object { [string]$_.qq })
+            if ($already -contains $Actor) {
+                $result = "你已经投过反对了（当前 $(@($vote.rejects).Count)/$VoteRejectNeed）。"
+            }
+            else {
+                $vote.rejects = @($vote.rejects) + @([pscustomobject]@{ qq = $Actor; at = (Get-Date).ToString('o') })
+                $rejectCount = @($vote.rejects).Count
+                if ($rejectCount -ge $VoteRejectNeed) {
+                    $vote.status = 'rejected'
+                    $approved = @($vote.votes).Count
+                    Save-Votes $all
+                    $result = "编号 $id 已被否决：$($vote.desc)。刚才只有 $approved/$($vote.need) 票同意、$rejectCount/$VoteRejectNeed 票反对，这次不授权了，谁再点同意也不算，要动手得重新发起投票。"
+                }
+                else {
+                    Save-Votes $all
+                    $result = "已记录反对（$rejectCount/$VoteRejectNeed），还差 $($VoteRejectNeed - $rejectCount) 票才会作废。"
+                }
+            }
         }
     }
 

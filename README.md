@@ -85,6 +85,8 @@ dsh-mc-server-ops/
 | `say` 游戏内广播 | 开 | 玩家不能 `say` |
 | `fileSend` 发文件到群 | 开 | 玩家不能把文件发到群里 |
 
+投票门槛也能改：`vote.approveNeed`（默认 2 位同意）和 `vote.rejectNeed`（默认 1 位反对即作废；改成 2 就要两个人反对才作废）。保存后会写进 `ops\data\vote-config.json`，脚本每次调用时读它。
+
 ## 安全模型
 
 - 仓库和 npm 包里**不含任何口令、QQ 号、记忆数据或整合包**。

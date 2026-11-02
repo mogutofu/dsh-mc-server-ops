@@ -188,6 +188,11 @@ export const Config = Schema.object({
     say: Schema.boolean().default(true).description('允许玩家用 say 在游戏里广播'),
     fileSend: Schema.boolean().default(true).description('允许玩家把普通文件发到群里'),
   }).description('功能开关'),
+
+  vote: Schema.object({
+    approveNeed: Schema.number().default(2).description('通过需要多少位群友同意'),
+    rejectNeed: Schema.number().default(1).description('多少位群友反对就作废（1 = 一票否决）'),
+  }).description('投票'),
 })
 
 export function apply(ctx, config) {
@@ -249,8 +254,13 @@ export function apply(ctx, config) {
   }
   const memoryConfig = {
     get: () => liveConfig,
-    set: (next) => { liveConfig = Object.assign({}, liveConfig, next && typeof next === 'object' ? next : {}) },
+    set: (next) => {
+      liveConfig = Object.assign({}, liveConfig, next && typeof next === 'object' ? next : {})
+      writeVoteConfig(opsDir, liveConfig.vote)
+    },
   }
+  // 启动时先落一份，保证脚本读到的是当前设置
+  writeVoteConfig(opsDir, (config && config.vote) || null)
   // 面板上刚保存的开关要立刻生效，所以每次都合并一次 liveConfig，而不是只用启动时读到的值。
   const currentPerms = () => Object.assign({}, perms, (liveConfig && liveConfig.permissions) || {})
 
@@ -556,6 +566,17 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     send(500, { error: String(error && error.message ? error.message : error) })
   }
 }
+/** 把投票门槛写到 ops\data\vote-config.json，脚本每次调用时读它。 */
+function writeVoteConfig(opsPath, voteCfg, fallback) {
+  try {
+    const src = voteCfg || fallback || {}
+    const approveNeed = Math.max(1, Number(src.approveNeed) || 2)
+    const rejectNeed = Math.max(1, Number(src.rejectNeed) || 1)
+    mkdirSync(join(opsPath, 'data'), { recursive: true })
+    writeFileSync(join(opsPath, 'data', 'vote-config.json'), JSON.stringify({ approveNeed, rejectNeed }), 'utf8')
+  } catch { }
+}
+
 /** 玩家侧功能开关：设置里关掉的项直接拒绝，不用等脚本再判一遍。 */
 function checkActionAllowed(action, perms) {
   if (action.startsWith('vote-') && !perms.voteEscalation) return '投票放权已经在设置里关掉了，这个操作只有服主能直接做。'
