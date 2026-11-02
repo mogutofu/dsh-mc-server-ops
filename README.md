@@ -116,6 +116,21 @@ TPS 也是按服务端自动探测：`forge tps` → `tps`（Paper/Spigot）→ 
 
 需要强制指定时可以设环境变量：`MC_JAR`（指定 jar）、`MC_JVM_ARGS`（覆盖 JVM 参数）、`MC_LAUNCH_ARGS`（覆盖整条启动参数）、`MC_SERVER_DIR`（服务器目录）。
 
+## 数据迁移
+
+运行期数据都在 `<服务器目录>\ops\data\`（绑定、投票、服主名单、口令、投票门槛）。换机器或换目录时用两个工具动作搬运：
+
+- `mc_server export-data`，arg 为目标 zip 路径 → 打包整个 `ops\data`
+- `mc_server import-data`，arg 为 zip 路径 → 解压覆盖回 `ops\data`
+
+两个动作都只有服主能调用。
+
+## 路线图 / 已知限制
+
+- **跨平台**：目前强依赖 Windows + PowerShell（`mcadmin.ps1`）。计划把 ops 层（RCON、进程探测、日志、启动）用 Node 重写，再让 PowerShell 版本只作为 Windows 的快速路径；在那之前，插件在 Linux/macOS 上只能做工具注册，跑不了运维动作。
+- **投票超时**：已实现。`vote.timeoutMinutes`（默认 15）到点没凑够门槛会自动标成 `expired`，不再占「同时最多 3 个待确认投票」的名额。
+- **人设注入范围**：按会话 id 前缀判断（`session-*` 是本机界面），是启发式；如果 DSH 以后改会话 id 规则，这里要跟着调。
+
 ## License
 
 MIT

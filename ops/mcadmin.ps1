@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('status', 'players', 'say', 'cmd', 'start', 'stop', 'restart', 'logs', 'crashinfo', 'whoami', 'help', 'bind', 'gamemode', 'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync', 'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status', 'owner-add', 'owner-del', 'owner-list', 'watchdog')]
+    [ValidateSet('status', 'players', 'say', 'cmd', 'start', 'stop', 'restart', 'logs', 'crashinfo', 'whoami', 'help', 'bind', 'gamemode', 'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync', 'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status', 'export-data', 'import-data', 'owner-add', 'owner-del', 'owner-list', 'watchdog')]
     [string]$Action,
 
     [string]$Arg = '',
@@ -141,14 +141,30 @@ function Enable-Whitelist {
 $VoteConfigFile = Join-Path $DataDir 'vote-config.json'
 $VoteApproveNeed = 2
 $VoteRejectNeed = 1
+$VoteTimeoutMinutes = 15
 try {
     if (Test-Path $VoteConfigFile) {
         $vc = Get-Content $VoteConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($vc.approveNeed) { $VoteApproveNeed = [Math]::Max(1, [int]$vc.approveNeed) }
         if ($vc.rejectNeed) { $VoteRejectNeed = [Math]::Max(1, [int]$vc.rejectNeed) }
+        if ($vc.timeoutMinutes) { $VoteTimeoutMinutes = [Math]::Max(1, [int]$vc.timeoutMinutes) }
     }
 }
 catch { }
+
+# 到点没凑够门槛的投票自动作废，避免一直挂在「待确认」里
+function Clear-ExpiredVotes {
+    $all = @(Get-Votes)
+    if ($all.Count -eq 0) { return }
+    $changed = $false
+    foreach ($v in $all) {
+        if ($v.status -eq 'open' -and $v.expiresAt -and ((Get-Date) -gt [datetime]$v.expiresAt)) {
+            $v.status = 'expired'
+            $changed = $true
+        }
+    }
+    if ($changed) { Save-Votes $all }
+}
 
 function Get-Votes {
     $doc = Read-Json $VoteFile @()
@@ -702,6 +718,7 @@ switch ($Action) {
     }
 
     'vote-start' {
+        Clear-ExpiredVotes
         if ([string]::IsNullOrWhiteSpace($Actor)) { throw 'NO_ACTOR: 先在群里 @ 我一下。' }
         if (-not $Arg) { throw 'USAGE: vote-start <要做什么的一句话说明>' }
         $all = @(Get-Votes)
@@ -716,13 +733,14 @@ switch ($Action) {
             rejects   = @()
             status    = 'open'
             createdAt = (Get-Date).ToString('o')
-            expiresAt = (Get-Date).AddMinutes(15).ToString('o')
+            expiresAt = (Get-Date).AddMinutes($VoteTimeoutMinutes).ToString('o')
         }
         Save-Votes $all
         $result = '投票已发起，编号 ' + $id + '。需要 ' + $VoteApproveNeed + ' 位群友回复「同意 ' + $id + '」才会放行；' + $(if ($VoteRejectNeed -le 1) { '凑够 ' + $VoteApproveNeed + ' 票之前只要有人回复「拒绝 ' + $id + '」，这次就不授权了。' } else { '凑够 ' + $VoteApproveNeed + ' 票之前有 ' + $VoteRejectNeed + ' 人回复「拒绝 ' + $id + '」，这次就不授权了。' })
     }
 
     'vote-approve' {
+        Clear-ExpiredVotes
         if ([string]::IsNullOrWhiteSpace($Actor)) { throw 'NO_ACTOR: 先在群里 @ 我一下。' }
         if (-not $Arg) { throw 'USAGE: vote-approve <编号>' }
         $id = $Arg.Trim()
@@ -753,6 +771,7 @@ switch ($Action) {
     }
 
     'vote-reject' {
+        Clear-ExpiredVotes
         if ([string]::IsNullOrWhiteSpace($Actor)) { throw 'NO_ACTOR: 先在群里 @ 我一下。' }
         if (-not $Arg) { throw 'USAGE: vote-reject <编号>' }
         $id = $Arg.Trim()
@@ -789,7 +808,32 @@ switch ($Action) {
         }
     }
 
+    'export-data' {
+        Assert-Owner
+        if (-not $Arg) { throw 'USAGE: export-data <zip 路径>' }
+        $dst = $Arg.Trim()
+        if (-not [System.IO.Path]::IsPathRooted($dst)) { $dst = Join-Path $ServerDir $dst }
+        $parent = Split-Path -Parent $dst
+        if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        if (Test-Path $dst) { Remove-Item $dst -Force }
+        if (-not (Test-Path $DataDir)) { throw '没有可导出的数据目录。' }
+        Compress-Archive -Path (Join-Path $DataDir '*') -DestinationPath $dst -Force
+        $result = "已导出到 $dst（绑定、投票、服主名单、口令、投票门槛；不含存档和日志）"
+    }
+
+    'import-data' {
+        Assert-Owner
+        if (-not $Arg) { throw 'USAGE: import-data <zip 路径>' }
+        $src = $Arg.Trim()
+        if (-not [System.IO.Path]::IsPathRooted($src)) { $src = Join-Path $ServerDir $src }
+        if (-not (Test-Path $src)) { throw "找不到文件：$src" }
+        New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+        Expand-Archive -Path $src -DestinationPath $DataDir -Force
+        $result = "已从 $src 导入到 $DataDir（同名文件覆盖，其它保留）"
+    }
+
     'vote-status' {
+        Clear-ExpiredVotes
         $all = @(Get-Votes)
         $open = @($all | Where-Object { $_.status -eq 'open' })
         if ($Arg) {

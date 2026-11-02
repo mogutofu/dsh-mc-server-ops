@@ -68,6 +68,7 @@ const ACTIONS = [
   'logs', 'crashinfo', 'whoami', 'help', 'bind', 'gamemode',
   'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync',
   'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status',
+  'export-data', 'import-data',
 ]
 
 function runMcAdmin(args, timeoutMs) {
@@ -136,6 +137,8 @@ const DESCRIPTION = [
   '- vote-approve：群友投同意票，arg 为投票编号；同一 QQ 只能投一次，满 2 人即通过，通过后本会话获得 10 分钟高权限',
   '- vote-reject：群友投反对票，arg 为投票编号；只要在满 2 票之前有人否决，这个投票立刻作废、不授权，之后再点同意也不算；已经通过的投票再否决无效',
   '- vote-status：查看投票进度（可带编号）',
+  '- export-data：把 ops\\data（绑定、投票、服主名单、口令）打成 zip，arg 为目标路径，仅服主',
+  '- import-data：从 zip 恢复 ops\\data，arg 为 zip 路径，仅服主',
   '',
   '玩家可以改服务器目录下除敏感区（ops\\data、world、白名单、eula、jar/exe/dll、密钥）之外的文件：kubejs 配方、config/defaultconfigs 配置、server.properties 等，write/edit 直接放行；改之前先备份，改完按需 reload。',
   '玩家不能改 kubejs 目录以外的任何文件。',
@@ -192,6 +195,7 @@ export const Config = Schema.object({
   vote: Schema.object({
     approveNeed: Schema.number().default(2).description('通过需要多少位群友同意'),
     rejectNeed: Schema.number().default(1).description('多少位群友反对就作废（1 = 一票否决）'),
+    timeoutMinutes: Schema.number().default(15).description('投票多少分钟没凑够门槛就自动作废'),
   }).description('投票'),
 })
 
@@ -573,7 +577,8 @@ function writeVoteConfig(opsPath, voteCfg, fallback) {
     const approveNeed = Math.max(1, Number(src.approveNeed) || 2)
     const rejectNeed = Math.max(1, Number(src.rejectNeed) || 1)
     mkdirSync(join(opsPath, 'data'), { recursive: true })
-    writeFileSync(join(opsPath, 'data', 'vote-config.json'), JSON.stringify({ approveNeed, rejectNeed }), 'utf8')
+    const timeoutMinutes = Math.max(1, Number(src.timeoutMinutes) || 15)
+    writeFileSync(join(opsPath, 'data', 'vote-config.json'), JSON.stringify({ approveNeed, rejectNeed, timeoutMinutes }), 'utf8')
   } catch { }
 }
 

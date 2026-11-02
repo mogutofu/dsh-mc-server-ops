@@ -68,6 +68,7 @@ window.__ModuleLoader__.load({
 						vote: {
 							approveNeed: (v.vote || {}).approveNeed ?? 2,
 							rejectNeed: (v.vote || {}).rejectNeed ?? 1,
+							timeoutMinutes: (v.vote || {}).timeoutMinutes ?? 15,
 						},
 						permissions: {
 							voteEscalation: (v.permissions || {}).voteEscalation !== false,
@@ -161,6 +162,8 @@ window.__ModuleLoader__.load({
 						h(NumberInput, { value: form.vote.approveNeed, onChange: (x) => patch("vote", "approveNeed", x) })),
 					h(Field, { label: "几位反对就作废", hint: "默认 1，也就是一票否决；改成 2 就要两个人反对才作废" },
 						h(NumberInput, { value: form.vote.rejectNeed, onChange: (x) => patch("vote", "rejectNeed", x) })),
+					h(Field, { label: "多久没凑够自动作废（分钟）", hint: "默认 15 分钟；到点没满票就变成「已过期」，不再占用待确认名额" },
+						h(NumberInput, { value: form.vote.timeoutMinutes, onChange: (x) => patch("vote", "timeoutMinutes", x) })),
 				),
 				h("div", null,
 					h("div", { style: titleStyle }, "功能开关"),
