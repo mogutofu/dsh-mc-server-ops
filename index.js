@@ -580,13 +580,17 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (!isPanel) return send(403, { error: '只接受来自设置面板的请求' })
 
     if (req.method === 'GET') {
-      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings' })
-      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory' })
+      const ownerCode = readOwnerCode(join(paths.serverDir, 'ops'))
+      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', ownerCode })
+      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', ownerCode })
     }
     if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
 
     const body = await readJsonBody(req)
     if (!body) return send(400, { error: '请求体不是合法 JSON' })
+    const wantRegen = body.regenerateOwnerCode === true
+    delete body.regenerateOwnerCode
+    if (wantRegen) regenerateOwnerCode(join(paths.serverDir, 'ops'))
 
     const dirArg = body && body.server && typeof body.server.dir === 'string' ? body.server.dir.trim() : ''
     if (dirArg && (/^[a-zA-Z]:[\\/]?$/.test(dirArg) || /^[\\/]+$/.test(dirArg))) {
@@ -641,6 +645,36 @@ function ensureOwnerSecret(opsPath) {
       writeFileSync(join(dataDir, 'owner-code.txt'), code, 'utf8')
     }
   } catch { }
+}
+
+/** 读当前一次性口令（没有就是空串） */
+function readOwnerCode(opsPath) {
+  try {
+    const codeFile = join(opsPath, 'data', 'owner-code.txt')
+    if (existsSync(codeFile)) return readFileSync(codeFile, 'utf8').trim()
+    const cfgFile = join(opsPath, 'data', 'config.json')
+    if (existsSync(cfgFile)) {
+      const cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')) || {}
+      return String(cfg.ownerSecret || '')
+    }
+  } catch { }
+  return ''
+}
+
+/** 重新生成一次性口令，写回 config.json 和 owner-code.txt */
+function regenerateOwnerCode(opsPath) {
+  const dataDir = join(opsPath, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const cfgFile = join(dataDir, 'config.json')
+  let cfg = {}
+  if (existsSync(cfgFile)) {
+    try { cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')) || {} } catch { cfg = {} }
+  }
+  const code = (Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)).toUpperCase()
+  cfg.ownerSecret = code
+  writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), 'utf8')
+  writeFileSync(join(dataDir, 'owner-code.txt'), code, 'utf8')
+  return code
 }
 
 /** 把投票门槛写到 ops\data\vote-config.json，脚本每次调用时读它。 */
