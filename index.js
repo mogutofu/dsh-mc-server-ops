@@ -65,7 +65,7 @@ function hasToolGrant(agentId) {
 
 const ACTIONS = [
   'status', 'players', 'say', 'cmd', 'start', 'stop', 'restart',
-  'logs', 'crashinfo', 'whoami', 'help', 'bind', 'gamemode',
+  'logs', 'crashinfo', 'whoami', 'help', 'gamemode',
   'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync',
   'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status',
   'export-data', 'import-data',
@@ -126,7 +126,6 @@ const DESCRIPTION = [
   '',
   '玩家还能做：用 read / glob / grep 看服务器文件、用只读的 pwsh 命令查信息、用 qqbot_send_file 把普通文件发到群里（口令/密钥类文件除外）。',
   '玩家不能：改文件、删文件、新建文件、执行危险命令、设置创造模式。',
-  '- bind：用一次性口令把自己绑成服主。arg 为口令，actor 为发送者 ID，channel 必须填 c2c（只在私聊生效；群里发会被拒绝）。绑定成功后口令立即作废',
   '- bind-player：把游戏名绑定到当前 QQ（同时加入服务器白名单），arg 为游戏名（1-16 位字母/数字/下划线），一个 QQ 最多 10 个，一个游戏名最多被 3 个 QQ 绑定',
   '- unbind-player：解绑自己的某个游戏名（若该名字已无其它 QQ 绑定，同时移出白名单），arg 为游戏名',
   '- my-players：列出自己绑定的游戏名和在线状态（任何人可用）',
@@ -268,7 +267,6 @@ export function apply(ctx, config) {
   }
   // 启动时先落一份，保证脚本读到的是当前设置
   writeVoteConfig(opsDir, (config && config.vote) || null)
-  ensureOwnerSecret(opsDir)
   // 面板上刚保存的开关要立刻生效，所以每次都合并一次 liveConfig，而不是只用启动时读到的值。
   const currentPerms = () => Object.assign({}, perms, (liveConfig && liveConfig.permissions) || {})
 
@@ -302,7 +300,7 @@ export function apply(ctx, config) {
         },
         arg: {
           type: 'string',
-          description: 'say 的内容、cmd 的指令（不带斜杠）、bind 的口令，其它操作为空',
+          description: 'say 的内容、cmd 的指令（不带斜杠）、口令，其它操作为空',
         },
         channel: {
           type: 'string',
@@ -587,22 +585,19 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
 
     if (req.method === 'GET') {
       const opsPath = join(paths.serverDir, 'ops')
-      const ownerCode = readOwnerCode(opsPath)
       const owners = readOwnersList(opsPath)
-      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', ownerCode, owners })
-      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', ownerCode, owners })
+      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', owners })
+      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', owners })
     }
     if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
 
     const body = await readJsonBody(req)
     if (!body) return send(400, { error: '请求体不是合法 JSON' })
-    const wantRegen = body.regenerateOwnerCode === true
     delete body.regenerateOwnerCode
     const addOwner = typeof body.addOwner === 'string' ? body.addOwner.trim() : ''
     delete body.addOwner
     const removeOwner = typeof body.removeOwner === 'string' ? body.removeOwner.trim() : ''
     delete body.removeOwner
-    if (wantRegen) regenerateOwnerCode(join(paths.serverDir, 'ops'))
     if (addOwner || removeOwner) {
       const target = addOwner || removeOwner
       if (!/^[A-Za-z0-9:_-]{8,64}$/.test(target)) return send(400, { error: 'QQ 号格式看起来不对（应为群消息里 [昵称 (ID)] 括号中那串）' })
@@ -648,24 +643,6 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     send(500, { error: String(error && error.message ? error.message : error) })
   }
 }
-/** 第一次启动时生成一次性绑定口令，写到 ops\data\owner-code.txt（只在服务器本机可见）。 */
-function ensureOwnerSecret(opsPath) {
-  try {
-    const dataDir = join(opsPath, 'data')
-    mkdirSync(dataDir, { recursive: true })
-    const cfgFile = join(dataDir, 'config.json')
-    let cfg = {}
-    if (existsSync(cfgFile)) {
-      try { cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')) || {} } catch { cfg = {} }
-    }
-    if (!('ownerSecret' in cfg)) {
-      const code = (Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)).toUpperCase()
-      cfg.ownerSecret = code
-      writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), 'utf8')
-      writeFileSync(join(dataDir, 'owner-code.txt'), code, 'utf8')
-    }
-  } catch { }
-}
 
 /** 读服主名单 */
 function readOwnersList(opsPath) {
@@ -677,35 +654,7 @@ function readOwnersList(opsPath) {
   } catch { return [] }
 }
 
-/** 读当前一次性口令（没有就是空串） */
-function readOwnerCode(opsPath) {
-  try {
-    const codeFile = join(opsPath, 'data', 'owner-code.txt')
-    if (existsSync(codeFile)) return readFileSync(codeFile, 'utf8').trim()
-    const cfgFile = join(opsPath, 'data', 'config.json')
-    if (existsSync(cfgFile)) {
-      const cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')) || {}
-      return String(cfg.ownerSecret || '')
-    }
-  } catch { }
-  return ''
-}
 
-/** 重新生成一次性口令，写回 config.json 和 owner-code.txt */
-function regenerateOwnerCode(opsPath) {
-  const dataDir = join(opsPath, 'data')
-  mkdirSync(dataDir, { recursive: true })
-  const cfgFile = join(dataDir, 'config.json')
-  let cfg = {}
-  if (existsSync(cfgFile)) {
-    try { cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')) || {} } catch { cfg = {} }
-  }
-  const code = (Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)).toUpperCase()
-  cfg.ownerSecret = code
-  writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), 'utf8')
-  writeFileSync(join(dataDir, 'owner-code.txt'), code, 'utf8')
-  return code
-}
 
 /** 把投票门槛写到 ops\data\vote-config.json，脚本每次调用时读它。 */
 function writeVoteConfig(opsPath, voteCfg, fallback) {

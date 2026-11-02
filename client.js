@@ -48,7 +48,6 @@ window.__ModuleLoader__.load({
 		function ConfigPanel() {
 			const [status, setStatus] = react.useState({ loading: true, error: "", saved: "", saving: false })
 			const [form, setForm] = react.useState(null)
-			const [ownerCode, setOwnerCode] = react.useState("")
 			const [owners, setOwners] = react.useState([])
 			const [newOwner, setNewOwner] = react.useState("")
 
@@ -85,7 +84,6 @@ window.__ModuleLoader__.load({
 							fileSend: (v.permissions || {}).fileSend !== false,
 						},
 					})
-					setOwnerCode(String(data.ownerCode || ""))
 					setOwners(Array.isArray(data.owners) ? data.owners : [])
 					setStatus({ loading: false, error: "", saved: "", saving: false })
 				} catch (err) {
@@ -114,15 +112,6 @@ window.__ModuleLoader__.load({
 				}
 			}
 
-			async function copyCode() {
-				try {
-					if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(ownerCode)
-					setStatus(Object.assign({}, status, { saved: "口令已复制", error: "" }))
-				} catch (err) {
-					setStatus(Object.assign({}, status, { error: "复制失败，请手动选中", saved: "" }))
-				}
-			}
-
 			async function submitOwner(kind, value) {
 				setStatus(Object.assign({}, status, { saving: true, error: "", saved: "" }))
 				try {
@@ -143,23 +132,6 @@ window.__ModuleLoader__.load({
 				}
 			}
 
-			async function regenerate() {
-				setStatus(Object.assign({}, status, { saving: true, error: "", saved: "" }))
-				try {
-					const res = await fetch(ENDPOINT, {
-						method: "POST",
-						headers: { "content-type": "application/json", "x-mc-ops-client": "1" },
-						body: JSON.stringify(Object.assign({}, form || {}, { regenerateOwnerCode: true })),
-					})
-					const data = await res.json()
-					if (!res.ok) throw new Error(data.error || ("HTTP " + res.status))
-					await load()
-					setStatus({ loading: false, error: "", saved: "已生成新口令", saving: false })
-				} catch (err) {
-					setStatus({ loading: false, error: String(err && err.message ? err.message : err), saved: "", saving: false })
-				}
-			}
-
 			if (status.loading) return h("div", { style: hintStyle }, "正在读取配置…")
 			if (status.error && !form) return h("div", { style: { color: "#d9534f", fontSize: 13 } }, "读取失败：" + status.error)
 			if (!form) return null
@@ -167,18 +139,9 @@ window.__ModuleLoader__.load({
 			return h("div", { style: box },
 				h("div", null,
 					h("div", { style: titleStyle }, "服主绑定"),
-					h("div", { style: hintStyle }, "把这个口令在【私聊】里发给机器人：「绑定 口令」。群里发无效，绑定成功后口令自动作废。"),
+					h("div", { style: hintStyle }, "填 QQ 号（openid）加服主。不知道自己 ID：在群里 @ 机器人 说「我的 ID 是多少」，它会把你消息开头 [昵称 (ID)] 里那串念给你。"),
 				),
 				h("div", { style: groupStyle },
-					ownerCode
-						? h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-							h("code", { style: { fontSize: 16, letterSpacing: 1, padding: "6px 10px", borderRadius: 6, background: "rgba(127,127,127,0.15)" } }, ownerCode),
-							h("button", { type: "button", style: buttonStyle, onClick: () => void copyCode() }, "复制"),
-							h("button", { type: "button", style: buttonStyle, onClick: () => void regenerate(), disabled: status.saving }, "重新生成"))
-						: h("div", { style: hintStyle }, "当前没有可用口令（可能已经绑定过了）。需要再绑一个服主就点下面的按钮重新生成。"),
-					h("div", null,
-						h("button", { type: "button", style: buttonStyle, onClick: () => void regenerate(), disabled: status.saving }, "生成新口令")),
-					h("div", { style: hintStyle }, "已经在名单里的服主不受影响；新口令同样只能私聊使用，且一次性。"),
 					h("div", { style: { borderTop: "1px solid rgba(127,127,127,0.22)", paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 } },
 						h("div", { style: labelStyle }, "服主名单（" + owners.length + "）"),
 						owners.length

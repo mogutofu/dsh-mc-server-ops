@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('status', 'players', 'say', 'cmd', 'start', 'stop', 'restart', 'logs', 'crashinfo', 'whoami', 'help', 'bind', 'gamemode', 'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync', 'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status', 'export-data', 'import-data', 'owner-add', 'owner-del', 'owner-list', 'watchdog')]
+    [ValidateSet('status', 'players', 'say', 'cmd', 'start', 'stop', 'restart', 'logs', 'crashinfo', 'whoami', 'help', 'gamemode', 'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync', 'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status', 'export-data', 'import-data', 'owner-add', 'owner-del', 'owner-list', 'watchdog')]
     [string]$Action,
 
     [string]$Arg = '',
@@ -912,40 +912,6 @@ switch ($Action) {
 权限：玩家可用 status/players/say/logs/crashinfo；服务器已宕机时任何人可 start；
 stop/restart/cmd（含 op/ban/kick 等）仅服主可用。
 '@
-    }
-
-    'bind' {
-        if (-not $Arg) { throw 'USAGE: bind <口令>' }
-        if (-not $secret) { throw '绑定口令未启用或已经用过；需要再加服主请用 owner-add（仅服主可执行）。' }
-        if ([string]::IsNullOrWhiteSpace($Actor)) { throw 'NO_ACTOR: 无法识别发送者身份。' }
-        if ($Channel -ne 'c2c') {
-            throw 'FORBIDDEN: 绑定口令只能在【私聊】里发送，群里发等于公开口令。请私聊机器人发「绑定 <口令>」。'
-        }
-        $attemptFile = Join-Path $DataDir 'bind-attempts.json'
-        $attempts = @(Read-Json $attemptFile @())
-        $recent = @($attempts | Where-Object { $_.actor -eq $Actor -and ([datetime]$_.at) -gt (Get-Date).AddMinutes(-10) })
-        if ($recent.Count -ge 5) { throw '尝试次数过多，请 10 分钟后再试。' }
-        if ($Arg.Trim() -ne $secret) {
-            $attempts = @($attempts | Where-Object { ([datetime]$_.at) -gt (Get-Date).AddHours(-1) }) +
-                        @([pscustomobject]@{ actor = $Actor; at = (Get-Date).ToString('o') })
-            Write-Json $attemptFile $attempts
-            throw 'FORBIDDEN: 绑定口令错误。'
-        }
-        if ($ownerIds -contains $Actor) {
-            $result = "已经是服主: $Actor"
-        }
-        else {
-            $ownerIds = @($ownerIds) + $Actor
-            Write-Json $OwnerFile ([pscustomobject]@{ owners = $ownerIds; boundAt = (Get-Date).ToString('o') })
-            # 一次性口令：绑完立刻作废，并清掉本机的口令文件
-            $cfg = Read-Json $ConfigFile ([pscustomobject]@{})
-            $cfg | Add-Member -Force -NotePropertyName ownerSecret -NotePropertyValue ''
-            Write-Json $ConfigFile $cfg
-            $codeFile = Join-Path $DataDir 'owner-code.txt'
-            if (Test-Path $codeFile) { Remove-Item $codeFile -Force -ErrorAction SilentlyContinue }
-            Remove-Item $attemptFile -Force -ErrorAction SilentlyContinue
-            $result = "绑定成功，$Actor 已加入服主名单。这个口令已经作废，其他人要加服主请用 owner-add。"
-        }
     }
 
     'owner-add' {
