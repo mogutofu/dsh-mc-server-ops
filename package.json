@@ -1,53 +1,60 @@
 {
-    "name":  "dsh-mc-server-ops",
-    "version":  "0.1.0",
-    "description":  "在 DeepSeek Harness 里托管 Minecraft 服务器的插件：状态/启停/日志/白名单/投票授权，并把人设注入 QQ 会话。需要先安装 QQ 机器人插件。",
-    "type":  "module",
-    "main":  "./index.js",
-    "exports":  {
-                    ".":  "./index.js",
-                    "./package.json":  "./package.json"
-                },
-    "files":  [
-                  "index.js",
-                  "cordis.patch.yml",
-                  "ops/*.ps1",
-                  "README.md",
-                  "LICENSE"
-              ],
-    "keywords":  [
-                     "deepseek-harness",
-                     "dsh",
-                     "dsh-plugin",
-                     "minecraft",
-                     "server",
-                     "qqbot",
-                     "cordis"
-                 ],
-    "license":  "MIT",
-    "engines":  {
-                    "node":  "\u003e=20.3.0"
-                },
-    "peerDependencies":  {
-                             "@deepseek-ai/schemastery":  "\u003e=3.18.1",
-                             "@tencent-connect/dsh-qqbot":  "\u003e=0.5.0"
-                         },
-    "peerDependenciesMeta":  {
-                                 "@tencent-connect/dsh-qqbot":  {
-                                                                    "optional":  true
-                                                                }
-                             },
-    "dsh":  {
-                "bundle":  {
-                               "patch":  "./cordis.patch.yml"
-                           }
-            },
-    "repository":  {
-                       "type":  "git",
-                       "url":  "https://github.com/mogutofu/dsh-mc-server-ops.git"
-                   },
-    "homepage":  "https://github.com/mogutofu/dsh-mc-server-ops#readme",
-    "bugs":  {
-                 "url":  "https://github.com/mogutofu/dsh-mc-server-ops/issues"
-             }
+  "name": "dsh-mc-server-ops",
+  "version": "0.2.0",
+  "description": "在 DeepSeek Harness 里托管 Minecraft 服务器的插件：状态/启停/日志/白名单/投票授权，并把人设注入 QQ 会话。需要先安装 QQ 机器人插件。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": {
+      "default": "./client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "ops/*.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "minecraft",
+    "server",
+    "qqbot",
+    "cordis"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.1",
+    "@tencent-connect/dsh-qqbot": ">=0.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@tencent-connect/dsh-qqbot": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mogutofu/dsh-mc-server-ops.git"
+  },
+  "homepage": "https://github.com/mogutofu/dsh-mc-server-ops#readme",
+  "bugs": {
+    "url": "https://github.com/mogutofu/dsh-mc-server-ops/issues"
+  }
 }

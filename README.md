@@ -69,6 +69,22 @@ dsh-mc-server-ops/
 
 首次运行时插件会把 `ops/*.ps1` 复制到 `<服务器目录>\ops\`，运行期数据（`bindings.json`、`votes.json`、`state.json`、`owners.json`）也生成在那里，**不会**写进本仓库。
 
+## 功能开关（设置界面里逐项开关）
+
+权限分成两层：**基础权限**（授权窗口、玩家能不能改文件）和**功能开关**（下面这 9 项）。关掉的那一项，玩家调用时插件会直接拒绝并说明原因，不会走到脚本；服主不受影响。
+
+| 开关 | 默认 | 关掉之后 |
+| --- | --- | --- |
+| `voteEscalation` 投票放权 | 开 | 只有服主能改 world / ops\data / 白名单 |
+| `kubejsEdit` 改 KubeJS 配方 | 开 | 玩家改 `kubejs/` 被拒 |
+| `configEdit` 改配置 | 开 | 玩家改 `config` / `defaultconfigs` / `server.properties` 被拒 |
+| `playerStart` 玩家开服 | 开 | 服务器关着也只有服主能开 |
+| `playerRestart` 玩家重启 | 开 | 崩溃/假死时也只有服主能重启 |
+| `playerStop` 玩家停服 | **关** | 玩家永远不能停服 |
+| `gamemodeSwitch` 切模式 | 开 | 玩家不能把自己切生存/旁观 |
+| `say` 游戏内广播 | 开 | 玩家不能 `say` |
+| `fileSend` 发文件到群 | 开 | 玩家不能把文件发到群里 |
+
 ## 安全模型
 
 - 仓库和 npm 包里**不含任何口令、QQ 号、记忆数据或整合包**。

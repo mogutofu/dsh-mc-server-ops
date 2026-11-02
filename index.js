@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
@@ -176,9 +176,32 @@ export const Config = Schema.object({
     grantHours: Schema.number().default(12).description('服主确认后，该会话可编辑文件/执行命令的有效时长（小时）'),
     riskApprovalSeconds: Schema.number().default(30).description('创建服主口令的冷却（秒），防止被刷'),
   }).description('权限'),
+
+  permissions: Schema.object({
+    voteEscalation: Schema.boolean().default(true).description('允许群友投票放权（改 world / ops\\data / 白名单）。关掉后只有服主能改'),
+    kubejsEdit: Schema.boolean().default(true).description('允许玩家改 KubeJS 配方脚本（kubejs/ 目录）'),
+    configEdit: Schema.boolean().default(true).description('允许玩家改 config / defaultconfigs / server.properties'),
+    playerStart: Schema.boolean().default(true).description('服务器关闭时，玩家可以用 start 开服'),
+    playerRestart: Schema.boolean().default(true).description('服务器崩溃或假死时，玩家可以 restart'),
+    playerStop: Schema.boolean().default(false).description('允许玩家停服（默认关闭，只有服主能停）'),
+    gamemodeSwitch: Schema.boolean().default(true).description('允许玩家把自己在生存 / 旁观之间切换'),
+    say: Schema.boolean().default(true).description('允许玩家用 say 在游戏里广播'),
+    fileSend: Schema.boolean().default(true).description('允许玩家把普通文件发到群里'),
+  }).description('功能开关'),
 })
 
 export function apply(ctx, config) {
+  const perms = Object.assign({
+    voteEscalation: true,
+    kubejsEdit: true,
+    configEdit: true,
+    playerStart: true,
+    playerRestart: true,
+    playerStop: false,
+    gamemodeSwitch: true,
+    say: true,
+    fileSend: true,
+  }, (config && config.permissions) || {})
   const cfgServer = (config && config.server) || {}
   const serverDir = String(cfgServer.dir || process.env.MC_SERVER_DIR || 'D:\\server').replace(/[\\/]+$/, '')
   paths.serverDir = serverDir
@@ -192,6 +215,57 @@ export function apply(ctx, config) {
   paths.ownersFile = join(opsDir, 'data', 'owners.json')
   paths.flipLog = join(opsDir, 'data', 'preset-flip.log')
 
+  // 设置页：插件详情里渲染自己的表单（client.js），表单通过下面这两个 HTTP 路由读写配置。
+  const settingsService = ctx.get('settings')
+  if (settingsService && typeof settingsService.configure === 'function') {
+    ctx.effect(() => settingsService.configure({ auto: true }))
+  }
+  // 诊断：等服务起来后把客户端模块图落盘，确认本包的 client 半屏有没有被加载。
+  setTimeout(() => {
+    const out = join(paths.serverDir, 'ops', 'data', 'client-graph.json')
+    const payload = { at: new Date().toISOString(), error: null, entryCount: 0, mine: [], sample: [] }
+    try {
+      const cm = ctx.get('clientModules')
+      if (!cm || typeof cm.graph !== 'function') payload.error = 'no clientModules service'
+      else {
+        const graph = cm.graph()
+        payload.entryCount = (graph.entries || []).length
+        payload.mine = (graph.entries || []).filter((e) => JSON.stringify(e).includes('mc-server-ops'))
+        payload.sample = (graph.entries || []).filter((e) => JSON.stringify(e).includes('qqbot'))
+      }
+    } catch (error) {
+      payload.error = String(error && error.message ? error.message : error)
+    }
+    try {
+      mkdirSync(dirname(out), { recursive: true })
+      writeFileSync(out, JSON.stringify(payload, null, 2), 'utf8')
+    } catch (error) { }
+  }, 8000)
+  // 面板读写用：内存里存一份当前配置，作为 settings/configEditor 都不可用时的兜底。
+  let liveConfig = {
+    server: Object.assign({ rconPort: 25575, rconPassword: '' }, (config && config.server) || {}, { dir: serverDir }),
+    persona: Object.assign({ enabled: true, name: '小铜', text: '', scope: 'qq' }, (config && config.persona) || {}),
+    ops: Object.assign({ allowPlayerWrite: true, grantHours: 12, riskApprovalSeconds: 30 }, (config && config.ops) || {}),
+  }
+  const memoryConfig = {
+    get: () => liveConfig,
+    set: (next) => { liveConfig = Object.assign({}, liveConfig, next && typeof next === 'object' ? next : {}) },
+  }
+  // 面板上刚保存的开关要立刻生效，所以每次都合并一次 liveConfig，而不是只用启动时读到的值。
+  const currentPerms = () => Object.assign({}, perms, (liveConfig && liveConfig.permissions) || {})
+
+  // 依赖可能比本插件晚就绪，用 ctx.inject 等它们可用再挂路由。
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['settings', 'webServer'], (scope) => {
+      const webServer = scope.get('webServer')
+      if (!webServer || typeof webServer.register !== 'function') return
+      scope.effect(() => webServer.register({
+        kind: 'prefix',
+        path: '/mc-ops/config',
+        handler: (req, res) => handleConfigRoute(req, res, { settings: scope.get('settings'), editor: scope.get('configEditor') }, memoryConfig),
+      }))
+    })
+  }
   const tools = ctx.get('tools')
   if (!tools || typeof tools.register !== 'function') return
 
@@ -227,6 +301,10 @@ export function apply(ctx, config) {
       if (!ACTIONS.includes(action)) throw new Error('mc_server: 不支持的 action: ' + action)
       const actor = String((args && args.actor) || '').trim()
       if (!actor) throw new Error('mc_server: actor 不能为空（必须取自 [昵称 (ID)] 标记）')
+      if (!isOwner(actor)) {
+        const denied = checkActionAllowed(action, currentPerms())
+        if (denied) return { ok: false, text: denied }
+      }
       const cli = ['-Action', action, '-Actor', actor]
       const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
       if (arg !== '') cli.push('-Arg', arg)
@@ -309,6 +387,9 @@ export function apply(ctx, config) {
 
     if (SEND_TOOLS.includes(exec.name)) {
       const target = String(args.file_path || args.path || '')
+      if (!currentPerms().fileSend) {
+        return '发文件到群里已经在设置里关掉了。'
+      }
       if (SENSITIVE_PATH.test(target)) {
         return '这个文件含口令/密钥或内部配置，不能发到群里；需要的话让服主自己取。'
       }
@@ -332,6 +413,9 @@ export function apply(ctx, config) {
     if (exec.name === 'write' || exec.name === 'edit') {
       const target = String(args.file_path || '')
       if (isPlayerWritable(target)) {
+        const t = target.replace(/\//g, '\\').toLowerCase()
+        if (t.includes('\\kubejs\\') && !currentPerms().kubejsEdit) return '玩家改 KubeJS 配方已经在设置里关掉了，需要服主自己来。'
+        if ((t.includes('\\config\\') || t.includes('defaultconfigs') || t.endsWith('server.properties')) && !currentPerms().configEdit) return '玩家改配置已经在设置里关掉了，需要服主自己来。'
         return undefined
       }
     }
@@ -378,6 +462,112 @@ function ensureOpsScripts(bundledDir, targetDir) {
     if (need) { try { copyFileSync(src, dst) } catch { } }
   }
 }
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) } catch { resolve(null) }
+    })
+    req.on('error', () => resolve(null))
+  })
+}
+
+/** 在本插件的配置条目里找一个能用的 descriptor：ns 可能是 include:xxx / xxx / 包名。 */
+function findSettingsEntry(list) {
+  const ids = ['mc-server-ops', 'dsh-mc-server-ops']
+  for (const d of list) {
+    const ns = String(d.ns || '')
+    if (ids.some((id) => ns.includes(id))) return d
+  }
+  for (const d of list) {
+    const v = d.value
+    if (v && typeof v === 'object' && (v.server || v.persona || v.ops)) return d
+  }
+  return undefined
+}
+
+/** 设置页的读写接口：GET 读当前配置，POST 合并保存。只服务本机 UI。 */
+async function handleConfigRoute(req, res, services, fallbackConfig) {
+  const send = (code, obj) => {
+    try {
+      res.statusCode = code
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(JSON.stringify(obj))
+    } catch { }
+  }
+  const dataDir = join(paths.serverDir, 'ops', 'data')
+  try {
+    const settings = services.settings
+    const editor = services.editor
+    let list = []
+    try { list = settings && typeof settings.describe === 'function' ? settings.describe() : [] } catch (error) { list = [] }
+    const desc = findSettingsEntry(list)
+
+    // 每次读取都记一份诊断，方便判断走的是哪条路径。
+    try {
+      mkdirSync(dataDir, { recursive: true })
+      writeFileSync(join(dataDir, 'settings-debug.json'), JSON.stringify({
+        at: new Date().toISOString(),
+        nss: list.map((d) => String(d.ns || '')),
+        picked: desc ? String(desc.ns) : null,
+        hasEditor: !!(editor && typeof editor.edit === 'function'),
+        entryIds: editor && typeof editor.entries === 'function' ? editor.entries().map((e) => String(e && e.id ? e.id : '')) : null,
+      }, null, 2), 'utf8')
+    } catch { }
+
+    if (req.method === 'GET') {
+      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings' })
+      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory' })
+    }
+    if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
+
+    const body = await readJsonBody(req)
+    if (!body) return send(400, { error: '请求体不是合法 JSON' })
+
+    if (desc) {
+      await settings.update(desc.ns, body, desc.revision)
+      fallbackConfig.set(body)
+      return send(200, { ok: true, via: 'settings' })
+    }
+    if (editor && typeof editor.entries === 'function' && typeof editor.edit === 'function') {
+      const entries = editor.entries()
+      const entry = entries.find((e) => {
+        const id = String(e && e.id ? e.id : '')
+        const name = String(e && e.moduleName ? e.moduleName : '')
+        return id.includes('mc-server-ops') || name.includes('mc-server-ops')
+      })
+      if (entry) {
+        await editor.edit(entry, (current) => Object.assign({}, current || {}, body))
+        fallbackConfig.set(body)
+        return send(200, { ok: true, via: 'configEditor' })
+      }
+    }
+    try {
+      mkdirSync(dataDir, { recursive: true })
+      writeFileSync(join(dataDir, 'settings-debug.json'), JSON.stringify({
+        at: new Date().toISOString(),
+        nss: list.map((d) => String(d.ns || '')),
+        entryIds: editor && typeof editor.entries === 'function' ? editor.entries().map((e) => String(e && e.id ? e.id : '')) : 'no-editor',
+      }, null, 2), 'utf8')
+    } catch { }
+    return send(500, { error: '没有找到本插件的配置条目（已写入 ops\\data\\settings-debug.json）' })
+  } catch (error) {
+    send(500, { error: String(error && error.message ? error.message : error) })
+  }
+}
+/** 玩家侧功能开关：设置里关掉的项直接拒绝，不用等脚本再判一遍。 */
+function checkActionAllowed(action, perms) {
+  if (action.startsWith('vote-') && !perms.voteEscalation) return '投票放权已经在设置里关掉了，这个操作只有服主能直接做。'
+  if (action === 'say' && !perms.say) return '游戏内广播已经在设置里关掉了。'
+  if (action === 'start' && !perms.playerStart) return '开服现在只有服主能做。'
+  if (action === 'restart' && !perms.playerRestart) return '重启现在只有服主能做。'
+  if (action === 'stop' && !perms.playerStop) return '停服只有服主能做。'
+  if (action === 'gamemode' && !perms.gamemodeSwitch) return '切游戏模式现在只有服主能做。'
+  if ((action === 'kubejs-backup' || action === 'kubejs-reload') && !perms.kubejsEdit) return 'KubeJS 相关操作已经在设置里关掉了。'
+  return ''
+}
+
 function renderPersona(persona) {
   const p = persona || {}
   const text = String(p.text || '').trim() || DEFAULT_PERSONA
