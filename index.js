@@ -75,7 +75,7 @@ function runMcAdmin(args, timeoutMs) {
   return new Promise((resolve) => {
     let child
     try {
-      child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.script, ...args], {
+      child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.script, '-ServerDir', paths.serverDir, ...args], {
         windowsHide: true,
         cwd: paths.serverDir,
       })
@@ -324,6 +324,10 @@ export function apply(ctx, config) {
       if (!ACTIONS.includes(action)) throw new Error('mc_server: 不支持的 action: ' + action)
       const actor = String((args && args.actor) || '').trim()
       if (!actor) throw new Error('mc_server: actor 不能为空（必须取自 [昵称 (ID)] 标记）')
+      const agentIdForGate = exec && exec.agent && exec.agent.id ? String(exec.agent.id) : ''
+      if ((action === 'owner-add' || action === 'owner-del') && !isLocalSession(agentIdForGate)) {
+        return { ok: false, text: '增删服主只能在设置面板里做，或者到服务器本机执行。' }
+      }
       if (!isOwner(actor)) {
         if (action === 'cmd') return { ok: false, text: '执行后台命令只有服主能做。' }
         if (action === 'export-data' || action === 'import-data' || action === 'whitelist-sync' || action === 'bindings') {
@@ -332,7 +336,9 @@ export function apply(ctx, config) {
         const denied = checkActionAllowed(action, currentPerms())
         if (denied) return { ok: false, text: denied }
       }
-      const cli = ['-Action', action, '-Actor', actor, '-Channel', String((args && args.channel) || 'unknown')]
+      // Channel 由会话决定，不信模型自己填：本机会话=console，QQ 会话=group，只有私聊且模型声明 c2c 才算 c2c
+      const channel = isLocalSession(agentIdForGate) ? 'console' : (String((args && args.channel) || '') === 'c2c' ? 'c2c' : 'group')
+      const cli = ['-Action', action, '-Actor', actor, '-Channel', channel]
       const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
       if (arg !== '') cli.push('-Arg', arg)
       const isWindows = process.platform === 'win32'
@@ -580,9 +586,11 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (!isPanel) return send(403, { error: '只接受来自设置面板的请求' })
 
     if (req.method === 'GET') {
-      const ownerCode = readOwnerCode(join(paths.serverDir, 'ops'))
-      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', ownerCode })
-      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', ownerCode })
+      const opsPath = join(paths.serverDir, 'ops')
+      const ownerCode = readOwnerCode(opsPath)
+      const owners = readOwnersList(opsPath)
+      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', ownerCode, owners })
+      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', ownerCode, owners })
     }
     if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
 
@@ -590,7 +598,19 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (!body) return send(400, { error: '请求体不是合法 JSON' })
     const wantRegen = body.regenerateOwnerCode === true
     delete body.regenerateOwnerCode
+    const addOwner = typeof body.addOwner === 'string' ? body.addOwner.trim() : ''
+    delete body.addOwner
+    const removeOwner = typeof body.removeOwner === 'string' ? body.removeOwner.trim() : ''
+    delete body.removeOwner
     if (wantRegen) regenerateOwnerCode(join(paths.serverDir, 'ops'))
+    if (addOwner || removeOwner) {
+      const target = addOwner || removeOwner
+      if (!/^[A-Za-z0-9:_-]{8,64}$/.test(target)) return send(400, { error: 'QQ 号格式看起来不对（应为群消息里 [昵称 (ID)] 括号中那串）' })
+      const cli = ['-Action', addOwner ? 'owner-add' : 'owner-del', '-Arg', target, '-Actor', 'LOCAL-CONSOLE', '-Channel', '']
+      const res = await runMcAdmin(cli, 30000)
+      if (!res.ok) return send(400, { error: res.text })
+      return send(200, { ok: true, owners: readOwnersList(join(paths.serverDir, 'ops')), result: res.text })
+    }
 
     const dirArg = body && body.server && typeof body.server.dir === 'string' ? body.server.dir.trim() : ''
     if (dirArg && (/^[a-zA-Z]:[\\/]?$/.test(dirArg) || /^[\\/]+$/.test(dirArg))) {
@@ -645,6 +665,16 @@ function ensureOwnerSecret(opsPath) {
       writeFileSync(join(dataDir, 'owner-code.txt'), code, 'utf8')
     }
   } catch { }
+}
+
+/** 读服主名单 */
+function readOwnersList(opsPath) {
+  try {
+    const file = join(opsPath, 'data', 'owners.json')
+    if (!existsSync(file)) return []
+    const doc = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+    return Array.isArray(doc.owners) ? doc.owners.map((x) => String(x)) : []
+  } catch { return [] }
 }
 
 /** 读当前一次性口令（没有就是空串） */

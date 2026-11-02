@@ -67,6 +67,8 @@ $secret = [string](Get-Prop $config 'ownerSecret' '')
 $ownerIds = @(Get-Owners)
 $role = 'unknown'
 if ($Actor -and ($ownerIds -contains $Actor)) { $role = 'owner' }
+# 本机控制台（面板/命令行）当作服主：只在 Channel 为空时生效，QQ 侧调用一律带 group/c2c
+if ($Actor -eq 'LOCAL-CONSOLE' -and ($Channel -eq '' -or $Channel -eq 'console')) { $role = 'owner' }
 
 function Get-Bindings {
     $doc = Read-Json $BindFile @()

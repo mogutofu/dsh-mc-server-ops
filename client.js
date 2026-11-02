@@ -49,6 +49,8 @@ window.__ModuleLoader__.load({
 			const [status, setStatus] = react.useState({ loading: true, error: "", saved: "", saving: false })
 			const [form, setForm] = react.useState(null)
 			const [ownerCode, setOwnerCode] = react.useState("")
+			const [owners, setOwners] = react.useState([])
+			const [newOwner, setNewOwner] = react.useState("")
 
 			react.useEffect(() => { void load() }, [])
 
@@ -84,6 +86,7 @@ window.__ModuleLoader__.load({
 						},
 					})
 					setOwnerCode(String(data.ownerCode || ""))
+					setOwners(Array.isArray(data.owners) ? data.owners : [])
 					setStatus({ loading: false, error: "", saved: "", saving: false })
 				} catch (err) {
 					setStatus({ loading: false, error: String(err && err.message ? err.message : err), saved: "", saving: false })
@@ -117,6 +120,26 @@ window.__ModuleLoader__.load({
 					setStatus(Object.assign({}, status, { saved: "口令已复制", error: "" }))
 				} catch (err) {
 					setStatus(Object.assign({}, status, { error: "复制失败，请手动选中", saved: "" }))
+				}
+			}
+
+			async function submitOwner(kind, value) {
+				setStatus(Object.assign({}, status, { saving: true, error: "", saved: "" }))
+				try {
+					const payload = Object.assign({}, form || {})
+					payload[kind] = value
+					const res = await fetch(ENDPOINT, {
+						method: "POST",
+						headers: { "content-type": "application/json", "x-mc-ops-client": "1" },
+						body: JSON.stringify(payload),
+					})
+					const data = await res.json()
+					if (!res.ok) throw new Error(data.error || ("HTTP " + res.status))
+					setOwners(Array.isArray(data.owners) ? data.owners : owners)
+					setNewOwner("")
+					setStatus({ loading: false, error: "", saved: kind === "addOwner" ? "已添加服主" : "已移除", saving: false })
+				} catch (err) {
+					setStatus({ loading: false, error: String(err && err.message ? err.message : err), saved: "", saving: false })
 				}
 			}
 
@@ -156,6 +179,18 @@ window.__ModuleLoader__.load({
 					h("div", null,
 						h("button", { type: "button", style: buttonStyle, onClick: () => void regenerate(), disabled: status.saving }, "生成新口令")),
 					h("div", { style: hintStyle }, "已经在名单里的服主不受影响；新口令同样只能私聊使用，且一次性。"),
+					h("div", { style: { borderTop: "1px solid rgba(127,127,127,0.22)", paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 } },
+						h("div", { style: labelStyle }, "服主名单（" + owners.length + "）"),
+						owners.length
+							? owners.map((id) => h("div", { key: id, style: { display: "flex", alignItems: "center", gap: 10 } },
+								h("code", { style: { fontSize: 12, opacity: 0.85 } }, id),
+								h("button", { type: "button", style: Object.assign({}, buttonStyle, { padding: "3px 10px", fontSize: 12 }), onClick: () => void submitOwner("removeOwner", id), disabled: status.saving }, "移除")))
+							: h("div", { style: hintStyle }, "还没有服主。在下面填 QQ 号加一个。"),
+						h("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } },
+							h("input", { style: Object.assign({}, inputStyle, { flex: "1 1 260px" }), value: newOwner, placeholder: "群消息里 [昵称 (ID)] 括号中的那串", onChange: (e) => setNewOwner(e.target.value) }),
+							h("button", { type: "button", style: buttonStyle, onClick: () => void submitOwner("addOwner", newOwner.trim()), disabled: status.saving || newOwner.trim().length < 8 }, "添加为服主")),
+						h("div", { style: hintStyle }, "面板在本机操作，等价于在服务器上执行 owner-add，不需要口令。"),
+					),
 				),
 				h("div", null,
 					h("div", { style: titleStyle }, "服务器"),
