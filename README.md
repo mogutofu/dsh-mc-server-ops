@@ -54,6 +54,15 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `persona.scope` | `qq` | `qq` 只注入 QQ 群/私聊；`all` 所有会话；`none` 关闭 |
 | `ops.allowPlayerWrite` | `true` | 允许玩家改服务器目录下非敏感文件 |
 | `ops.grantHours` | `12` | 服主确认后可编辑文件/执行命令的有效时长 |
+| `adapter` | `local` | 写操作走哪条路：`local` 本机脚本；`panel` Pterodactyl 面板 HTTP API |
+| `panel.url` | 空 | 面板地址，`adapter=panel` 时必填 |
+| `panel.serverId` | 空 | 面板里该服务器 URL 最后一段（8 位短 ID） |
+| `panel.clientApiKey` | 空 | 客户端 API Key（`ptlc_` 开头） |
+| `vote.approveNeed` | `2` | 通过需要几位群友同意 |
+| `vote.rejectNeed` | `1` | 几位反对就作废（1 = 一票否决） |
+| `vote.timeoutMinutes` | `15` | 多久没凑够门槛自动作废 |
+| `vote.vetoEnabled` | `true` | 是否允许一票否决；关掉后反对票只记录、不作废 |
+| `vote.protectedPaths` | `world, ops/data, whitelist` | 改动这些位置需要群友投票放行 |
 
 ## 目录结构
 
@@ -62,7 +71,9 @@ dsh-mc-server-ops/
 ├── index.js            # 插件宿主代码：mc_server 工具、权限守卫、人设注入
 ├── cordis.patch.yml    # 安装时自动插入的加载行
 └── ops/
-    ├── rcon.mjs             # 跨平台核心：RCON、进程探测、日志、状态汇总
+    ├── command-guard.mjs   # 静态命令拦截：出网前掐掉“一条命令搞崩整个服”的类型
+    ├── rcon.mjs            # 跨平台核心：RCON、进程探测、日志、状态汇总
+    ├── adapters/           # 写操作适配器：local（本机脚本）/ panel（Pterodactyl）
     ├── mcadmin.ps1         # 运维入口（status/start/stop/投票/白名单…）
     ├── watchdog.ps1        # 看门狗：崩溃自动拉起
     └── server-console.ps1  # 带日志着色的服务器控制台
@@ -112,7 +123,32 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 | `say` 游戏内广播 | 开 | 玩家不能 `say` |
 | `fileSend` 发文件到群 | 开 | 玩家不能把文件发到群里 |
 
-投票门槛也能改：`vote.approveNeed`（默认 2 位同意）和 `vote.rejectNeed`（默认 1 位反对即作废；改成 2 就要两个人反对才作废）。保存后会写进 `ops\data\vote-config.json`，脚本每次调用时读它。
+投票门槛也能改：`vote.approveNeed`（默认 2 位同意）、`vote.rejectNeed`（默认 1 位反对即作废）、`vote.timeoutMinutes`（默认 15 分钟）、`vote.vetoEnabled`（关掉后反对票只记录、不作废）、`vote.protectedPaths`（哪些位置算受保护区域，默认 world / ops/data / whitelist）。保存后会写进 `ops\data\vote-config.json`，脚本每次调用时读它。
+
+## 命令拦截（静态，绕不过去）
+
+`ops/command-guard.mjs` 是 RCON 出网前的最后一道闸，只拦“一条命令就能把服搞崩”的类型：
+
+| 拦截项 | 谁能发 |
+| --- | --- |
+| `kill @a` / `kill @e` / `kill @r` / `kill *` | 谁都发不了 |
+| `kick @a` / `kick @e` | 谁都发不了 |
+| `whitelist off` / `whitelist clear` | 谁都发不了 |
+| `execute ... run kill @a` | 谁都发不了（换个写法也绕不过） |
+| `stop` | 只有服主 |
+
+`op` / `deop` / `execute` / `ban` 这类**正常管理指令不拦**——它们本来就是 `cmd` 的用途，只在插件层限制“只有服主能发”。`say` / `tell` / `msg` / `title` 等聊天类前缀直接放行，避免把聊天内容误判成指令。
+
+同一套规则在两处生效：插件层（`index.js`）判身份，PowerShell 层（`mcadmin.ps1` 的 `Assert-CommandSafe`）兜底——直接调脚本也拦得住。
+
+## 连接方式：本机 / Pterodactyl 面板
+
+`adapter` 决定 `start` / `stop` / `restart` / `cmd` 这四个写操作走哪里：
+
+- **`local`（默认）** — 本机直接跑 `ops/mcadmin.ps1`（Windows）或 `ops/rcon.mjs`（其它平台），行为和以前完全一致。
+- **`panel`** — 走 Pterodactyl 客户端 API：`POST /api/client/servers/{id}/power`（`signal` = `start` / `stop` / `restart` / `kill`）、`POST /api/client/servers/{id}/command`，鉴权头 `Authorization: Bearer <clientApiKey>`。
+
+只读操作（`status` / `players` / `logs` / `crashinfo`）不经过适配器。要接别的面板（Pelican、AMP、PufferPanel）只需再写一个适配器文件，接口就五个方法：`start` / `stop` / `restart` / `sendCommand` / `getStatus`。
 
 ## 安全模型
 
@@ -123,6 +159,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 - 设置面板的读写接口要求自定义请求头（浏览器会先发预检），跨站页面伪造不了；只改配置，不碰存档。
 - `export-data` / `import-data` 仅服主可用；导入时会拒绝含 `..` 或绝对路径的压缩包条目（防 zip slip）。
 - `cmd`（op/ban/kick 这类后台指令）在插件层就拦下非服主，不依赖脚本再判一次。
+- `kill @a` / `kick @a` / `whitelist off` 这类“一条命令清场”的指令由静态拦截器直接拒绝，服主也发不出去；拦截在两处生效（插件层 + PowerShell 层）。
 
 ## 运行环境
 

@@ -145,12 +145,14 @@ $VoteConfigFile = Join-Path $DataDir 'vote-config.json'
 $VoteApproveNeed = 2
 $VoteRejectNeed = 1
 $VoteTimeoutMinutes = 15
+$VoteVetoEnabled = $true
 try {
     if (Test-Path $VoteConfigFile) {
         $vc = Get-Content $VoteConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($vc.approveNeed) { $VoteApproveNeed = [Math]::Max(1, [int]$vc.approveNeed) }
         if ($vc.rejectNeed) { $VoteRejectNeed = [Math]::Max(1, [int]$vc.rejectNeed) }
         if ($vc.timeoutMinutes) { $VoteTimeoutMinutes = [Math]::Max(1, [int]$vc.timeoutMinutes) }
+        if ($null -ne $vc.vetoEnabled) { $VoteVetoEnabled = [bool]$vc.vetoEnabled }
     }
 }
 catch { }
@@ -200,7 +202,21 @@ function Get-RconPassword {
     return ($hit.Line -replace '^rcon\.password=', '').Trim()
 }
 
+# 静态命令拦截（与 ops/command-guard.mjs 同规则）：只拦“一条命令搞崩整个服”的类型。
+# 这里不判身份——stop 这类“仅服主”的闸由 action 层的 Assert-Owner 负责，
+# 因为 restart 走的是 doStop → RCON stop，玩家在假死时本来就有权重启。
+function Assert-CommandSafe([string]$Command) {
+    if ([string]::IsNullOrWhiteSpace($Command)) { return }
+    $c = (($Command.Trim() -replace '^/+', '') -replace '\s+', ' ')
+    if ($c -match '^(say|tell|msg|tellraw|title|subtitle|actionbar)\b') { return }
+    if ($c -match '^kill\s+(@[aer]\b|\*)') { throw 'BLOCKED: kill @a / @e / @r 会一次清场，已拦截。' }
+    if ($c -match '^kick\s+@[ae]\b') { throw 'BLOCKED: kick @a / @e 会踢光所有人，已拦截。' }
+    if ($c -match '^whitelist\s+(off|clear)\b') { throw 'BLOCKED: 关白名单/清空白名单已拦截。' }
+    if ($c -match '^execute\b.*\brun\s+kill\s+(@[aer]\b|\*)') { throw 'BLOCKED: execute ... run kill @a 已拦截。' }
+}
+
 function Invoke-Rcon([string]$Command, [int]$TimeoutMs = 8000) {
+    Assert-CommandSafe $Command
     $pass = Get-RconPassword
     if (-not $pass) { throw 'rcon password missing' }
     $tcp = New-Object System.Net.Sockets.TcpClient
@@ -739,7 +755,7 @@ switch ($Action) {
             expiresAt = (Get-Date).AddMinutes($VoteTimeoutMinutes).ToString('o')
         }
         Save-Votes $all
-        $result = '投票已发起，编号 ' + $id + '。需要 ' + $VoteApproveNeed + ' 位群友回复「同意 ' + $id + '」才会放行；' + $(if ($VoteRejectNeed -le 1) { '凑够 ' + $VoteApproveNeed + ' 票之前只要有人回复「拒绝 ' + $id + '」，这次就不授权了。' } else { '凑够 ' + $VoteApproveNeed + ' 票之前有 ' + $VoteRejectNeed + ' 人回复「拒绝 ' + $id + '」，这次就不授权了。' })
+        $result = '投票已发起，编号 ' + $id + '。需要 ' + $VoteApproveNeed + ' 位群友回复「同意 ' + $id + '」才会放行；' + $(if (-not $VoteVetoEnabled) { '当前设置关闭了一票否决，反对票只记录、不作废。' } elseif ($VoteRejectNeed -le 1) { '凑够 ' + $VoteApproveNeed + ' 票之前只要有人回复「拒绝 ' + $id + '」，这次就不授权了。' } else { '凑够 ' + $VoteApproveNeed + ' 票之前有 ' + $VoteRejectNeed + ' 人回复「拒绝 ' + $id + '」，这次就不授权了。' })
     }
 
     'vote-approve' {
@@ -797,7 +813,11 @@ switch ($Action) {
             else {
                 $vote.rejects = @($vote.rejects) + @([pscustomobject]@{ qq = $Actor; at = (Get-Date).ToString('o') })
                 $rejectCount = @($vote.rejects).Count
-                if ($rejectCount -ge $VoteRejectNeed) {
+                if (-not $VoteVetoEnabled) {
+                    Save-Votes $all
+                    $result = "已记录反对（$rejectCount 票），不过当前设置关闭了一票否决，这个投票继续有效。"
+                }
+                elseif ($rejectCount -ge $VoteRejectNeed) {
                     $vote.status = 'rejected'
                     $approved = @($vote.votes).Count
                     Save-Votes $all

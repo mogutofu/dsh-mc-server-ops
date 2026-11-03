@@ -3,6 +3,8 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writ
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
+import { guardCommand } from './ops/command-guard.mjs'
+import { createAdapter } from './ops/adapters/index.mjs'
 
 // 运行期路径：apply() 里按配置初始化。服务器目录、脚本位置都可以在设置里改。
 const paths = { serverDir: '', script: '', ownersFile: '', flipLog: '' }
@@ -24,14 +26,37 @@ const SENSITIVE_PATH = /(server\.properties|ops[\\/]+data[\\/]+|\.credentials|\.
 // 玩家可以改的范围：KubeJS 的 server_scripts（配方脚本）
 // 玩家可以改的范围：服务器目录下除敏感区之外的文件（修配置、修脚本用）
 function normalizePath(p) { return String(p || '').replace(/\//g, '\\').toLowerCase() }
+
+// 永远不许玩家碰的东西（和投票无关，改设置也解不开）
+const ALWAYS_DENY_SOURCE = '\\.dsh|credential|\\.key$|\\.pem$|\\.env$|ops\\.json|banned-|usercache\\.json|eula\\.txt|server\\.jar|\\.exe$|\\.dll$|\\.lnk$'
+// 受保护路径：可在设置里改（默认 world / ops/data / whitelist），改动这些位置要走群友投票
+const DEFAULT_PROTECTED = ['world', 'ops/data', 'whitelist']
+let PROTECTED_PATHS = DEFAULT_PROTECTED.slice()
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function protectedSource() {
+  const parts = PROTECTED_PATHS.map((raw) => {
+    const p = String(raw || '').trim()
+    if (!p) return ''
+    const n = normalizePath(p).replace(/\\+$/, '')
+    if (n === 'world') return 'world(_nether|_the_end)?[\\\\/]'
+    if (n === 'ops\\data') return 'ops[\\\\/]+data'
+    if (n === 'whitelist' || n === 'whitelist.json') return 'whitelist\\.json'
+    return escapeRegExp(n) + '(?:[\\\\/]|$)'
+  }).filter(Boolean)
+  return '(' + parts.concat([ALWAYS_DENY_SOURCE]).join('|') + ')'
+}
+function isProtectedPath(target) { return new RegExp(protectedSource(), 'i').test(normalizePath(target)) }
+function setProtectedPaths(list) {
+  const next = Array.isArray(list) ? list.map((x) => String(x)).filter((x) => x.trim()) : []
+  PROTECTED_PATHS = next.length ? next : DEFAULT_PROTECTED.slice()
+}
 function isPlayerWritable(target) {
   const root = normalizePath(paths.serverDir).replace(/\\+$/, '') + '\\'
   const t = normalizePath(target)
   if (!root || !t.startsWith(root)) return false
   if (t.includes('..')) return false
-  return !PLAYER_WRITE_DENY.test(t)
+  return !isProtectedPath(t)
 }
-const PLAYER_WRITE_DENY = /(ops[\\/]+data|world(_nether|_the_end)?[\\/]|\.dsh|credential|\.key$|\.pem$|\.env$|whitelist\.json|ops\.json|banned-|usercache\.json|eula\.txt|server\.jar|\.exe$|\.dll$|\.lnk$)/i
 // 只读命令白名单：只允许这些开头/包含的命令查询
 const READONLY_CMD = /\b(Get-Content|Get-ChildItem|Get-Item|Get-ItemProperty|Select-String|Select-Object|Where-Object|Sort-Object|Measure-Object|Format-Table|Format-List|Write-Output|Write-Host|Test-Path|Resolve-Path|Split-Path|Join-Path|Get-Process|Get-Service|Get-CimInstance|Get-ComputerInfo|Get-Date|Get-Location|Get-FileHash|Get-Acl|whoami|hostname|systeminfo|tasklist|dir|ls|cat|type|more|findstr|tree)\b/i
 // 写文件 / 执行 / 联网下载 / 进程控制等危险命令
@@ -155,6 +180,8 @@ const DESCRIPTION = [
 
 export const name = 'mc-server-ops'
 export const inject = ['tools']
+// 诊断/测试用：判断某个路径是否落在受保护区域，以及临时改一份受保护清单
+export { isProtectedPath, setProtectedPaths }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 // 跨平台的只读动作：Windows 上走 PowerShell（信息更全），其它平台走 Node 核心
@@ -195,10 +222,21 @@ export const Config = Schema.object({
   }).description('功能开关'),
 
   vote: Schema.object({
-    approveNeed: Schema.number().default(2).description('通过需要多少位群友同意'),
-    rejectNeed: Schema.number().default(1).description('多少位群友反对就作废（1 = 一票否决）'),
-    timeoutMinutes: Schema.number().default(15).description('投票多少分钟没凑够门槛就自动作废'),
+    approveNeed: Schema.number().min(1).default(2).description('通过需要多少位群友同意'),
+    rejectNeed: Schema.number().min(1).default(1).description('多少位群友反对就作废（1 = 一票否决）'),
+    timeoutMinutes: Schema.number().min(1).default(15).description('投票多少分钟没凑够门槛就自动作废'),
+    vetoEnabled: Schema.boolean().default(true).description('允许一票否决：凑够同意票之前有人反对就作废。关掉后反对票只记录、不作废'),
+    protectedPaths: Schema.array(Schema.string()).default(['world', 'ops/data', 'whitelist'])
+      .description('受保护路径：改动这些位置需要群友投票放行。默认 world, ops/data, whitelist'),
   }).description('投票'),
+
+  adapter: Schema.union(['local', 'panel']).default('local')
+    .description('写操作走哪条路：local=本机直接跑脚本（默认）；panel=通过 Pterodactyl 面板的 HTTP API 启停/发指令'),
+  panel: Schema.object({
+    url: Schema.string().default('').description('面板地址，例如 https://panel.example.com（不要带结尾斜杠）'),
+    serverId: Schema.string().default('').description('服务器 ID：面板里该服务器 URL 的最后一段（8 位短 UUID）'),
+    clientApiKey: Schema.string().default('').description('客户端 API Key（ptlc_ 开头，面板 → Account → API Credentials 里生成）'),
+  }).description('Pterodactyl 面板（adapter 选 panel 时才用）'),
 })
 
 export function apply(ctx, config) {
@@ -257,18 +295,32 @@ export function apply(ctx, config) {
     server: Object.assign({ rconPort: 25575, rconPassword: '' }, (config && config.server) || {}, { dir: serverDir }),
     persona: Object.assign({ enabled: true, name: '小铜', text: '', scope: 'qq' }, (config && config.persona) || {}),
     ops: Object.assign({ allowPlayerWrite: true, grantHours: 12, riskApprovalSeconds: 30 }, (config && config.ops) || {}),
+    adapter: String((config && config.adapter) || 'local'),
+    panel: Object.assign({ url: '', serverId: '', clientApiKey: '' }, (config && config.panel) || {}),
   }
   const memoryConfig = {
     get: () => liveConfig,
     set: (next) => {
       liveConfig = Object.assign({}, liveConfig, next && typeof next === 'object' ? next : {})
       writeVoteConfig(opsDir, liveConfig.vote)
+      setProtectedPaths(liveConfig.vote && liveConfig.vote.protectedPaths)
     },
   }
   // 启动时先落一份，保证脚本读到的是当前设置
   writeVoteConfig(opsDir, (config && config.vote) || null)
+  setProtectedPaths(config && config.vote && config.vote.protectedPaths)
   // 面板上刚保存的开关要立刻生效，所以每次都合并一次 liveConfig，而不是只用启动时读到的值。
   const currentPerms = () => Object.assign({}, perms, (liveConfig && liveConfig.permissions) || {})
+  // 写操作统一走适配器：local 包装 mcadmin.ps1 / rcon.mjs，panel 打 Pterodactyl 的 HTTP API。
+  // 每次调用时按当前配置现建一个，面板里改完地址不用重启。
+  const ADAPTER_ACTIONS = new Set(['start', 'stop', 'restart', 'cmd'])
+  const currentAdapter = () => createAdapter(liveConfig && liveConfig.adapter, {
+    runMcAdmin,
+    runNodeOps,
+    isWindows: process.platform === 'win32',
+    nodeActions: NODE_ACTIONS,
+    panel: (liveConfig && liveConfig.panel) || {},
+  })
 
   // 依赖可能比本插件晚就绪，用 ctx.inject 等它们可用再挂路由。
   if (typeof ctx.inject === 'function') {
@@ -339,12 +391,37 @@ export function apply(ctx, config) {
       const cli = ['-Action', action, '-Actor', actor, '-Channel', channel]
       const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
       if (arg !== '') cli.push('-Arg', arg)
+      // ── 出网前的三道闸 ──
+      // ① 权限校验：上面已经拦掉服主专属动作和设置里关掉的功能
+      // ② 投票放行：服主本人，或本会话刚通过群友投票（grant 窗口）
+      // ③ 静态拦截：command-guard.mjs 只拦“一条命令搞崩整个服”的类型
+      // 三道全过才真正发给 RCON。
+      if (action === 'cmd' || action === 'say') {
+        const owner = isOwner(actor)
+        const voteCleared = hasToolGrant(agentIdForGate)
+        const raw = action === 'say' ? 'say ' + arg : arg
+        const verdict = guardCommand(raw, { id: actor, owner })
+        if (!verdict.ok) {
+          const who = owner ? '服主' : (voteCleared ? '已投票放行的会话' : '玩家')
+          return { ok: false, text: '⛔ 命令被拦截（' + who + '）：' + verdict.reason }
+        }
+      }
+
       const isWindows = process.platform === 'win32'
       if (!isWindows && !NODE_ACTIONS.has(action)) {
         return { ok: false, text: `（${process.platform}）${action} 还没跨平台，目前只在 Windows 上可用。跨平台可用的是：${[...NODE_ACTIONS].join(' / ')}` }
       }
       const useNode = !isWindows && NODE_ACTIONS.has(action) && existsSync(NODE_RUNNER)
-      const result = useNode ? await runNodeOps(action, arg, 60000) : await runMcAdmin(cli, 170000)
+      let result
+      if (ADAPTER_ACTIONS.has(action)) {
+        const adapter = currentAdapter()
+        const adapterOpts = { actor, channel, owner: isOwner(actor), timeoutMs: 170000 }
+        result = action === 'cmd'
+          ? await adapter.sendCommand(arg, adapterOpts)
+          : await adapter[action](adapterOpts)
+      } else {
+        result = useNode ? await runNodeOps(action, arg, 60000, isOwner(actor)) : await runMcAdmin(cli, 170000)
+      }
       if (isOwner(actor)) {
         grantTools(exec && exec.agent ? exec.agent.id : undefined)
       }
@@ -498,12 +575,13 @@ function ensureOpsScripts(bundledDir, targetDir) {
     if (need) { try { copyFileSync(src, dst) } catch { } }
   }
 }
-function runNodeOps(action, arg, timeoutMs) {
+function runNodeOps(action, arg, timeoutMs, owner) {
   return new Promise((resolve) => {
     let child
     try {
       const argv = [NODE_RUNNER, '--dir', paths.serverDir, '--action', action]
       if (arg !== undefined && arg !== null && String(arg) !== '') argv.push('--arg', String(arg))
+      if (owner) argv.push('--owner')
       child = spawn(process.execPath, argv, { windowsHide: true, cwd: paths.serverDir })
     } catch (error) {
       resolve({ ok: false, text: '无法启动 node: ' + (error && error.message ? error.message : String(error)) })
@@ -612,6 +690,12 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
       return send(400, { error: '服务器目录不能填盘符根目录，请填具体目录（例如 D:\\server）。' })
     }
 
+    // 面板上「受保护路径」是一个逗号分隔的文本框，存之前转成数组
+    if (body && body.vote && typeof body.vote.protectedPaths === 'string') {
+      body.vote.protectedPaths = body.vote.protectedPaths.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (!body.vote.protectedPaths.length) body.vote.protectedPaths = ['world', 'ops/data', 'whitelist']
+    }
+
     if (desc) {
       await settings.update(desc.ns, body, desc.revision)
       fallbackConfig.set(body)
@@ -664,7 +748,11 @@ function writeVoteConfig(opsPath, voteCfg, fallback) {
     const rejectNeed = Math.max(1, Number(src.rejectNeed) || 1)
     mkdirSync(join(opsPath, 'data'), { recursive: true })
     const timeoutMinutes = Math.max(1, Number(src.timeoutMinutes) || 15)
-    writeFileSync(join(opsPath, 'data', 'vote-config.json'), JSON.stringify({ approveNeed, rejectNeed, timeoutMinutes }), 'utf8')
+    const vetoEnabled = src.vetoEnabled !== false
+    const protectedPaths = Array.isArray(src.protectedPaths) && src.protectedPaths.length
+      ? src.protectedPaths.map((x) => String(x)).filter(Boolean)
+      : ['world', 'ops/data', 'whitelist']
+    writeFileSync(join(opsPath, 'data', 'vote-config.json'), JSON.stringify({ approveNeed, rejectNeed, timeoutMinutes, vetoEnabled, protectedPaths }), 'utf8')
   } catch { }
 }
 

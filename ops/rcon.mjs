@@ -15,14 +15,16 @@ import { createConnection } from 'node:net'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { guardCommand } from './command-guard.mjs'
 
 function parseArgs(argv) {
-  const out = { dir: process.cwd(), action: 'status', arg: '' }
+  const out = { dir: process.cwd(), action: 'status', arg: '', owner: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--dir') out.dir = argv[++i]
     else if (a === '--action') out.action = argv[++i]
     else if (a === '--arg') out.arg = argv[++i]
+    else if (a === '--owner') out.owner = true
   }
   return out
 }
@@ -364,7 +366,7 @@ async function doStop(dir, call, waitSec = 90) {
 }
 
 async function main() {
-  const { dir, action, arg } = parseArgs(process.argv.slice(2))
+  const { dir, action, arg, owner } = parseArgs(process.argv.slice(2))
   const props = readProperties(dir)
   const port = Number(props['rcon.port'] || 25575)
   const password = props['rcon.password'] || ''
@@ -379,6 +381,9 @@ async function main() {
   if (action === 'say' || action === 'cmd') {
     if (!enabled) throw new Error('server.properties 里没有开启 RCON')
     const text = action === 'say' ? 'say ' + arg : arg
+    // 直调本脚本时也要过静态拦截，避免绕过插件层（--owner 由插件按 owners.json 决定）
+    const verdict = guardCommand(text, { id: 'cli', owner: !!owner })
+    if (!verdict.ok) throw new Error('命令被拦截：' + verdict.reason)
     process.stdout.write(await call(text, 8000))
     return
   }

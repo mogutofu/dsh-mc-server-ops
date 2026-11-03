@@ -67,10 +67,20 @@ window.__ModuleLoader__.load({
 							grantHours: (v.ops || {}).grantHours ?? 12,
 							riskApprovalSeconds: (v.ops || {}).riskApprovalSeconds ?? 30,
 						},
+						adapter: v.adapter === "panel" ? "panel" : "local",
+						panel: {
+							url: (v.panel || {}).url || "",
+							serverId: (v.panel || {}).serverId || "",
+							clientApiKey: (v.panel || {}).clientApiKey || "",
+						},
 						vote: {
 							approveNeed: (v.vote || {}).approveNeed ?? 2,
 							rejectNeed: (v.vote || {}).rejectNeed ?? 1,
 							timeoutMinutes: (v.vote || {}).timeoutMinutes ?? 15,
+							vetoEnabled: (v.vote || {}).vetoEnabled !== false,
+							protectedPaths: Array.isArray((v.vote || {}).protectedPaths) && (v.vote || {}).protectedPaths.length
+								? (v.vote || {}).protectedPaths.join(", ")
+								: "world, ops/data, whitelist",
 						},
 						permissions: {
 							voteEscalation: (v.permissions || {}).voteEscalation !== false,
@@ -93,6 +103,11 @@ window.__ModuleLoader__.load({
 
 			function patch(group, key, value) {
 				setForm((prev) => (prev ? Object.assign({}, prev, { [group]: Object.assign({}, prev[group], { [key]: value }) }) : prev))
+			}
+
+			// 顶层字段（adapter 这种不是对象的）单独一个入口
+			function setTop(key, value) {
+				setForm((prev) => (prev ? Object.assign({}, prev, { [key]: value }) : prev))
 			}
 
 			async function save() {
@@ -173,6 +188,25 @@ window.__ModuleLoader__.load({
 							h("option", { value: "none" }, "关闭人设注入"))),
 				),
 				h("div", null,
+					h("div", { style: titleStyle }, "连接方式"),
+					h("div", { style: hintStyle }, "启停和后台指令走哪条路。服务器就在这台机器上选「本机」；托管在翼龙面板上选「Pterodactyl」。状态、日志这些只读操作不受影响。"),
+				),
+				h("div", { style: groupStyle },
+					h(Field, { label: "写操作走哪里" },
+						h("select", { style: inputStyle, value: form.adapter, onChange: (e) => setTop("adapter", e.target.value) },
+							h("option", { value: "local" }, "本机（直接跑脚本，默认）"),
+							h("option", { value: "panel" }, "Pterodactyl 面板（HTTP API）"))),
+					form.adapter === "panel"
+						? h("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+							h(Field, { label: "面板地址", hint: "例如 https://panel.example.com，不要带结尾斜杠" },
+								h(TextInput, { value: form.panel.url, placeholder: "https://…", onChange: (x) => patch("panel", "url", x) })),
+							h(Field, { label: "服务器 ID", hint: "面板里这台服务器 URL 的最后一段（8 位短 ID）" },
+								h(TextInput, { value: form.panel.serverId, placeholder: "a1b2c3d4", onChange: (x) => patch("panel", "serverId", x) })),
+							h(Field, { label: "客户端 API Key", hint: "面板 → Account → API Credentials 生成，ptlc_ 开头" },
+								h(TextInput, { value: form.panel.clientApiKey, placeholder: "ptlc_…", onChange: (x) => patch("panel", "clientApiKey", x) })))
+						: h("div", { style: hintStyle }, "当前用本机脚本启停，不需要面板配置。"),
+				),
+				h("div", null,
 					h("div", { style: titleStyle }, "人设"),
 					h("div", { style: hintStyle }, "默认是小铜。改名字和语气只需要改这里，代码不用动。"),
 				),
@@ -205,6 +239,9 @@ window.__ModuleLoader__.load({
 						h(NumberInput, { value: form.vote.rejectNeed, onChange: (x) => patch("vote", "rejectNeed", x) })),
 					h(Field, { label: "多久没凑够自动作废（分钟）", hint: "默认 15 分钟；到点没满票就变成「已过期」，不再占用待确认名额" },
 						h(NumberInput, { value: form.vote.timeoutMinutes, onChange: (x) => patch("vote", "timeoutMinutes", x) })),
+					h(Toggle, { label: "允许一票否决（凑够同意票之前有人反对就作废）", value: form.vote.vetoEnabled, onChange: (x) => patch("vote", "vetoEnabled", x) }),
+					h(Field, { label: "受保护路径", hint: "逗号分隔，改动这些位置要走投票。默认 world, ops/data, whitelist" },
+						h(TextInput, { value: form.vote.protectedPaths, placeholder: "world, ops/data, whitelist", onChange: (x) => patch("vote", "protectedPaths", x) })),
 				),
 				h("div", null,
 					h("div", { style: titleStyle }, "功能开关"),
