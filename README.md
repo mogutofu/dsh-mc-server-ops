@@ -201,6 +201,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 - Windows + PowerShell 5.1（脚本用 `powershell.exe -File` 调用）
 - Node.js ≥ 20（DSH 自带）
+- DSH ≥ 0.2.0（`package.json` 里用 `engines.dsh` 声明，安装时会校验）
 
 **服务端不限类型**，插件只看端口、RCON 和进程，不假设你跑的是哪一家：
 
