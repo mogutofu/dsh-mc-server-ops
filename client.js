@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
 			const [status, setStatus] = react.useState({ loading: true, error: "", saved: "", saving: false })
 			const [form, setForm] = react.useState(null)
 			const [owners, setOwners] = react.useState([])
+			const [bridgeState, setBridgeState] = react.useState(null)
 			const [newOwner, setNewOwner] = react.useState("")
 
 			react.useEffect(() => { void load() }, [])
@@ -73,6 +74,20 @@ window.__ModuleLoader__.load({
 							serverId: (v.panel || {}).serverId || "",
 							clientApiKey: (v.panel || {}).clientApiKey || "",
 						},
+						bridge: {
+							enabled: (v.bridge || {}).enabled === true,
+							mode: (v.bridge || {}).mode || "auto",
+							groups: Array.isArray((v.bridge || {}).groups) ? (v.bridge || {}).groups.join(", ") : "",
+							appId: (v.bridge || {}).appId || "",
+							appSecret: (v.bridge || {}).appSecret || "",
+							events: {
+								join: ((v.bridge || {}).events || {}).join !== false,
+								leave: ((v.bridge || {}).events || {}).leave !== false,
+								death: ((v.bridge || {}).events || {}).death === true,
+							},
+							coalesceMs: (v.bridge || {}).coalesceMs ?? 3000,
+							maxPerDay: (v.bridge || {}).maxPerDay ?? 900,
+						},
 						vote: {
 							approveNeed: (v.vote || {}).approveNeed ?? 2,
 							rejectNeed: (v.vote || {}).rejectNeed ?? 1,
@@ -95,6 +110,7 @@ window.__ModuleLoader__.load({
 						},
 					})
 					setOwners(Array.isArray(data.owners) ? data.owners : [])
+					setBridgeState(data.bridgeState || null)
 					setStatus({ loading: false, error: "", saved: "", saving: false })
 				} catch (err) {
 					setStatus({ loading: false, error: String(err && err.message ? err.message : err), saved: "", saving: false })
@@ -108,6 +124,16 @@ window.__ModuleLoader__.load({
 			// 顶层字段（adapter 这种不是对象的）单独一个入口
 			function setTop(key, value) {
 				setForm((prev) => (prev ? Object.assign({}, prev, { [key]: value }) : prev))
+			}
+
+			// bridge 里还嵌着 events，单独给两个入口
+			function patchBridge(key, value) {
+				setForm((prev) => (prev ? Object.assign({}, prev, { bridge: Object.assign({}, prev.bridge, { [key]: value }) }) : prev))
+			}
+			function patchBridgeEvent(key, value) {
+				setForm((prev) => (prev ? Object.assign({}, prev, {
+					bridge: Object.assign({}, prev.bridge, { events: Object.assign({}, prev.bridge.events, { [key]: value }) }),
+				}) : prev))
 			}
 
 			async function save() {
@@ -242,6 +268,40 @@ window.__ModuleLoader__.load({
 					h(Toggle, { label: "允许一票否决（凑够同意票之前有人反对就作废）", value: form.vote.vetoEnabled, onChange: (x) => patch("vote", "vetoEnabled", x) }),
 					h(Field, { label: "受保护路径", hint: "逗号分隔，改动这些位置要走投票。默认 world, ops/data, whitelist" },
 						h(TextInput, { value: form.vote.protectedPaths, placeholder: "world, ops/data, whitelist", onChange: (x) => patch("vote", "protectedPaths", x) })),
+				),
+				h("div", null,
+					h("div", { style: titleStyle }, "群服互通"),
+					h("div", { style: hintStyle }, "把游戏内聊天直接转发到 QQ 群。走机器人自己的接口，不经过 AI、不消耗 token。"),
+				),
+				h("div", { style: groupStyle },
+					bridgeState
+						? h("div", { style: Object.assign({}, hintStyle, { color: bridgeState.running ? "#3c9a5f" : "#d9534f" }) },
+							(bridgeState.running ? "● 运行中" : "○ 未运行")
+							+ " · 在线 " + ((bridgeState.online || []).length) + " 人"
+							+ " · 今日已发 " + (bridgeState.sentToday || 0) + " 条"
+							+ (bridgeState.lastError ? " · ⚠ " + bridgeState.lastError : ""))
+						: null,
+					h(Toggle, { label: "启用群服互通", value: form.bridge.enabled, onChange: (x) => patchBridge("enabled", x) }),
+					h(Field, { label: "运行模式", hint: "auto 只有人玩的时候才转发（推荐）；on 一直转发；off 完全关闭" },
+						h("select", { style: inputStyle, value: form.bridge.mode, onChange: (e) => patchBridge("mode", e.target.value) },
+							h("option", { value: "auto" }, "有玩家时开启（默认）"),
+							h("option", { value: "on" }, "常开启"),
+							h("option", { value: "off" }, "常关闭"))),
+					h(Field, { label: "转发到哪些群", hint: "群 openid，逗号分隔。不知道的话在群里 @ 小铜 问" },
+						h(TextInput, { value: form.bridge.groups, placeholder: "FC73DE60… ", onChange: (x) => patchBridge("groups", x) })),
+					h(Field, { label: "除聊天外还转发", hint: "聊天内容始终转发" },
+						h("div", { style: { display: "flex", gap: 18, flexWrap: "wrap" } },
+							h(Toggle, { label: "玩家加入", value: form.bridge.events.join, onChange: (x) => patchBridgeEvent("join", x) }),
+							h(Toggle, { label: "玩家离开", value: form.bridge.events.leave, onChange: (x) => patchBridgeEvent("leave", x) }),
+							h(Toggle, { label: "死亡消息", value: form.bridge.events.death, onChange: (x) => patchBridgeEvent("death", x) }))),
+					h(Field, { label: "合并窗口（毫秒）", hint: "这段时间内的多条游戏消息合成一条 QQ 消息，默认 3000" },
+						h(NumberInput, { value: form.bridge.coalesceMs, onChange: (x) => patchBridge("coalesceMs", x) })),
+					h(Field, { label: "每群每天发送上限", hint: "官方上限 1000 条/天，默认 900 留余量" },
+						h(NumberInput, { value: form.bridge.maxPerDay, onChange: (x) => patchBridge("maxPerDay", x) })),
+					h(Field, { label: "AppID", hint: "留空自动从本机 qqbot 配置读取，一般不用填" },
+						h(TextInput, { value: form.bridge.appId, placeholder: "留空 = 自动", onChange: (x) => patchBridge("appId", x) })),
+					h(Field, { label: "AppSecret", hint: "同上，留空自动读" },
+						h(TextInput, { value: form.bridge.appSecret, placeholder: "留空 = 自动", onChange: (x) => patchBridge("appSecret", x) })),
 				),
 				h("div", null,
 					h("div", { style: titleStyle }, "功能开关"),

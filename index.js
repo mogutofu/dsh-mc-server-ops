@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
 import { guardCommand } from './ops/command-guard.mjs'
 import { createAdapter } from './ops/adapters/index.mjs'
+import { createBridge, writeBridgeState, QqApi } from './ops/qq-bridge.mjs'
 
 // 运行期路径：apply() 里按配置初始化。服务器目录、脚本位置都可以在设置里改。
 const paths = { serverDir: '', script: '', ownersFile: '', flipLog: '' }
@@ -88,12 +89,34 @@ function hasToolGrant(agentId) {
   return until > Date.now()
 }
 
+/**
+ * 从本机 DSH profile 的 cordis.patch.yml 里读 qqbot 的 AppID / AppSecret。
+ * 只在插件设置里没填的时候用；读不到就返回 null，不抛错。
+ */
+function readQqbotCredentials() {
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME || ''
+    if (!home) return null
+    const dir = join(home, '.dsh', 'profiles')
+    if (!existsSync(dir)) return null
+    for (const name of readdirSync(dir)) {
+      const file = join(dir, name, 'cordis.patch.yml')
+      if (!existsSync(file)) continue
+      const raw = readFileSync(file, 'utf8')
+      const id = /appId:\s*'?([0-9]+)'?/.exec(raw)
+      const sec = /appSecret:\s*'?([A-Za-z0-9_]+)'?/.exec(raw)
+      if (id && sec) return { appId: id[1], appSecret: sec[1] }
+    }
+  } catch { /* 读不到就算了 */ }
+  return null
+}
+
 const ACTIONS = [
   'status', 'players', 'say', 'cmd', 'start', 'stop', 'restart',
   'logs', 'crashinfo', 'whoami', 'help', 'gamemode',
   'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync',
   'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status',
-  'export-data', 'import-data',
+  'export-data', 'import-data', 'bridge-groups',
 ]
 
 function runMcAdmin(args, timeoutMs) {
@@ -163,6 +186,7 @@ const DESCRIPTION = [
   '- vote-status：查看投票进度（可带编号）',
   '- export-data：把 ops\\data（绑定、投票、服主名单、口令）打成 zip，arg 为目标路径，仅服主',
   '- import-data：从 zip 恢复 ops\\data，arg 为 zip 路径，仅服主',
+  '- bridge-groups：列出机器人加入的 QQ 群（群名 + 群 openid），配置群服互通时用来填 groups，仅服主',
   '',
   '玩家可以改服务器目录下除敏感区（ops\\data、world、白名单、eula、jar/exe/dll、密钥）之外的文件：kubejs 配方、config/defaultconfigs 配置、server.properties 等，write/edit 直接放行；改之前先备份，改完按需 reload。',
   '玩家不能改 kubejs 目录以外的任何文件。',
@@ -237,6 +261,24 @@ export const Config = Schema.object({
     serverId: Schema.string().default('').description('服务器 ID：面板里该服务器 URL 的最后一段（8 位短 UUID）'),
     clientApiKey: Schema.string().default('').description('客户端 API Key（ptlc_ 开头，面板 → Account → API Credentials 里生成）'),
   }).description('Pterodactyl 面板（adapter 选 panel 时才用）'),
+
+  bridge: Schema.object({
+    enabled: Schema.boolean().default(false)
+      .description('群服互通：把游戏内聊天直接转发到 QQ 群。不经过 AI，不消耗 token'),
+    mode: Schema.union(['auto', 'on', 'off']).default('auto')
+      .description('auto=有玩家在线才转发（默认）；on=常开；off=常关'),
+    groups: Schema.array(Schema.string()).default([])
+      .description('转发到哪些群（群 openid）。用 mc_server 的 bridge-groups 可以查机器人加入的群'),
+    appId: Schema.string().default('').description('QQ 机器人 AppID；留空自动从本机 qqbot 插件配置里读'),
+    appSecret: Schema.string().default('').description('QQ 机器人 AppSecret；留空自动读'),
+    events: Schema.object({
+      join: Schema.boolean().default(true).description('转发玩家加入'),
+      leave: Schema.boolean().default(true).description('转发玩家离开'),
+      death: Schema.boolean().default(false).description('转发死亡消息（本地化文案，容易刷屏，默认关）'),
+    }).description('除聊天外还要转发哪些事件'),
+    coalesceMs: Schema.number().default(3000).description('多少毫秒内的多条消息合并成一条 QQ 消息'),
+    maxPerDay: Schema.number().default(900).description('每个群每天最多发几条（官方上限 1000，留余量）'),
+  }).description('群服互通'),
 })
 
 export function apply(ctx, config) {
@@ -297,6 +339,10 @@ export function apply(ctx, config) {
     ops: Object.assign({ allowPlayerWrite: true, grantHours: 12, riskApprovalSeconds: 30 }, (config && config.ops) || {}),
     adapter: String((config && config.adapter) || 'local'),
     panel: Object.assign({ url: '', serverId: '', clientApiKey: '' }, (config && config.panel) || {}),
+    bridge: Object.assign({
+      enabled: false, mode: 'auto', groups: [], appId: '', appSecret: '',
+      events: { join: true, leave: true, death: false }, coalesceMs: 3000, maxPerDay: 900,
+    }, (config && config.bridge) || {}),
   }
   const memoryConfig = {
     get: () => liveConfig,
@@ -321,6 +367,36 @@ export function apply(ctx, config) {
     nodeActions: NODE_ACTIONS,
     panel: (liveConfig && liveConfig.panel) || {},
   })
+
+  // ── 群服互通：游戏聊天 → QQ 群（不经过 AI，不产生 token）──
+  // 常驻创建、常驻运行：是否真的转发由 liveConfig.bridge.enabled 决定，
+  // 这样在面板里打开开关立刻生效，不用再重启一次。
+  let bridge = null
+  {
+    const auto = readQqbotCredentials()
+    const appId = String(liveConfig.bridge.appId || (auto && auto.appId) || '')
+    const appSecret = String(liveConfig.bridge.appSecret || (auto && auto.appSecret) || '')
+    bridge = createBridge({
+      serverDir,
+      appId,
+      appSecret,
+      readConfig: () => (liveConfig && liveConfig.bridge) || {},
+      log: (m) => {
+        try { appendFileSync(join(opsDir, 'data', 'bridge.log'), new Date().toISOString() + ' ' + m + '\n') } catch { }
+      },
+    })
+    ctx.effect(() => {
+      void bridge.start()
+      const tick = setInterval(() => {
+        writeBridgeState(serverDir, Object.assign(
+          { appId: appId ? appId.slice(0, 3) + '***' : '', hasSecret: !!appSecret },
+          bridge.status(),
+        ))
+      }, 10000)
+      if (tick.unref) tick.unref()
+      return () => { clearInterval(tick); bridge.stop() }
+    })
+  }
 
   // 依赖可能比本插件晚就绪，用 ctx.inject 等它们可用再挂路由。
   if (typeof ctx.inject === 'function') {
@@ -380,7 +456,7 @@ export function apply(ctx, config) {
       }
       if (!isOwner(actor)) {
         if (action === 'cmd') return { ok: false, text: '执行后台命令只有服主能做。' }
-        if (action === 'export-data' || action === 'import-data' || action === 'whitelist-sync' || action === 'bindings') {
+        if (action === 'export-data' || action === 'import-data' || action === 'whitelist-sync' || action === 'bindings' || action === 'bridge-groups') {
           return { ok: false, text: '这个操作只有服主能做。' }
         }
         const denied = checkActionAllowed(action, currentPerms())
@@ -404,6 +480,22 @@ export function apply(ctx, config) {
         if (!verdict.ok) {
           const who = owner ? '服主' : (voteCleared ? '已投票放行的会话' : '玩家')
           return { ok: false, text: '⛔ 命令被拦截（' + who + '）：' + verdict.reason }
+        }
+      }
+
+      // 群服互通：列机器人加入的群，供填 bridge.groups
+      if (action === 'bridge-groups') {
+        const auto = readQqbotCredentials()
+        const bCfg = (liveConfig && liveConfig.bridge) || {}
+        const appId = String(bCfg.appId || (auto && auto.appId) || '')
+        const appSecret = String(bCfg.appSecret || (auto && auto.appSecret) || '')
+        try {
+          const groups = await new QqApi({ appId, appSecret }).listGroups()
+          if (!groups.length) return { ok: true, text: '机器人还没加入任何群（或者没有「群管理」权限，拿不到群列表）。' }
+          return { ok: true, text: groups.map((g) => g.name + '\n  ' + g.openid).join('\n') }
+        } catch (error) {
+          const message = error && error.message ? error.message : String(error)
+          return { ok: false, text: '查群列表失败：' + message + '\n（需要 AppID/AppSecret，以及开放平台的「群管理」权限）' }
         }
       }
 
@@ -664,8 +756,8 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (req.method === 'GET') {
       const opsPath = join(paths.serverDir, 'ops')
       const owners = readOwnersList(opsPath)
-      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', owners })
-      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', owners })
+      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', owners, bridgeState: readBridgeState() })
+      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', owners, bridgeState: readBridgeState() })
     }
     if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
 
@@ -694,6 +786,10 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (body && body.vote && typeof body.vote.protectedPaths === 'string') {
       body.vote.protectedPaths = body.vote.protectedPaths.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
       if (!body.vote.protectedPaths.length) body.vote.protectedPaths = ['world', 'ops/data', 'whitelist']
+    }
+    // 群列表同理
+    if (body && body.bridge && typeof body.bridge.groups === 'string') {
+      body.bridge.groups = body.bridge.groups.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
     }
 
     if (desc) {
@@ -736,6 +832,23 @@ function readOwnersList(opsPath) {
     const doc = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
     return Array.isArray(doc.owners) ? doc.owners.map((x) => String(x)) : []
   } catch { return [] }
+}
+
+/** 读群服互通的运行状态（插件每 10 秒落一次盘），只把面板需要的字段传出去。 */
+function readBridgeState() {
+  try {
+    const file = join(paths.serverDir, 'ops', 'data', 'bridge-state.json')
+    if (!existsSync(file)) return null
+    const doc = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+    return {
+      running: doc.running === true,
+      mode: String(doc.mode || ''),
+      online: Array.isArray(doc.online) ? doc.online.map(String) : [],
+      sentToday: Number(doc.sentToday) || 0,
+      lastError: String(doc.lastError || ''),
+      at: String(doc.at || ''),
+    }
+  } catch { return null }
 }
 
 

@@ -63,6 +63,13 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `vote.timeoutMinutes` | `15` | 多久没凑够门槛自动作废 |
 | `vote.vetoEnabled` | `true` | 是否允许一票否决；关掉后反对票只记录、不作废 |
 | `vote.protectedPaths` | `world, ops/data, whitelist` | 改动这些位置需要群友投票放行 |
+| `bridge.enabled` | `false` | 是否启用群服互通（游戏聊天 → QQ 群） |
+| `bridge.mode` | `auto` | `auto` 有玩家在线才转发 / `on` 常开 / `off` 常关 |
+| `bridge.groups` | `[]` | 转发到哪些群（群 openid） |
+| `bridge.events` | `join/leave` 开、`death` 关 | 除聊天外还转发哪些事件 |
+| `bridge.coalesceMs` | `3000` | 多条游戏消息合并成一条 QQ 消息的窗口 |
+| `bridge.maxPerDay` | `900` | 每群每天发送上限（官方上限 1000） |
+| `bridge.appId` / `appSecret` | 空 | 留空自动从本机 qqbot 插件配置读取 |
 
 ## 目录结构
 
@@ -72,7 +79,9 @@ dsh-mc-server-ops/
 ├── cordis.patch.yml    # 安装时自动插入的加载行
 └── ops/
     ├── command-guard.mjs   # 静态命令拦截：出网前掐掉“一条命令搞崩整个服”的类型
+    ├── qq-bridge.mjs       # 群服互通：读日志 → 直连 QQ 开放平台（不经过 AI）
     ├── rcon.mjs            # 跨平台核心：RCON、进程探测、日志、状态汇总
+    ├── rcon-probe.mjs      # 极简 RCON 探测（查在线玩家）
     ├── adapters/           # 写操作适配器：local（本机脚本）/ panel（Pterodactyl）
     ├── mcadmin.ps1         # 运维入口（status/start/stop/投票/白名单…）
     ├── watchdog.ps1        # 看门狗：崩溃自动拉起
@@ -150,6 +159,32 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 只读操作（`status` / `players` / `logs` / `crashinfo`）不经过适配器。要接别的面板（Pelican、AMP、PufferPanel）只需再写一个适配器文件，接口就五个方法：`start` / `stop` / `restart` / `sendCommand` / `getStatus`。
 
+## 群服互通（游戏聊天 → QQ 群）
+
+**不经过 AI，不消耗 token。** 桥直接读服务器日志、直接调 QQ 开放平台接口：群里的人能看到游戏里说了什么，全程不创建 agent 会话、不调模型。
+
+| 模式 | 行为 |
+| --- | --- |
+| `auto`（默认） | 有玩家在线才转发；服务器空转时自动静默，不占配额 |
+| `on` | 常开 |
+| `off` | 常关 |
+
+转发内容：玩家聊天（始终）、加入 / 离开（默认开）、死亡消息（默认关 —— 文案是本地化的，容易刷屏）。
+
+实现要点：
+
+- **收** — 增量 tail `logs/latest.log`，**按字节切行**（中文是多字节，先转字符串再切会在块边界切坏字），再识别 `<玩家> 内容`、`joined the game`、`left the game`。
+- **编码** — 服务器的日志是**系统编码**（中文 Windows 上是 GBK），不是 UTF-8。解码器先按 UTF-8 试，出现替换字符 `U+FFFD` 就自动退回 GBK。这一步不做的话，中文在 QQ 里会变成 `��ôţ��`。
+- **发** — 直接 `POST https://api.bot.qq.com/v2/groups/{openid}/messages`，头是 `Authorization: QQBot <access_token>`；token 用 AppID/AppSecret 换，缓存到过期前 1 分钟。
+- **聚合** — `coalesceMs` 窗口内的多条消息合成一条。官方对群主动消息的限制是 **20 条/分钟、每群 1000 条/天**，一条游戏聊天发一条 QQ 会很快撞墙。
+- **限流** — `maxPerDay`（默认 900）本地兜底，超了停发，面板状态行会显示原因。
+- **清洗** — URL 换成 `[链接]`（QQ 会拒收含 URL 的主动消息）、剥掉颜色码 `§x` 和控制字符、单条截断到 900 字。
+- **防环** — 带 `[群]` / `[QQ]` 前缀的消息不再转发，避免 QQ → 游戏 → QQ 打转。
+
+配置在设置面板的「群服互通」里，**改完立刻生效**（不用重启），状态行会显示「运行中 / 在线几人 / 今日已发几条 / 错误原因」。
+
+群 openid 不知道怎么办：官方没有「列出机器人加入的群」的稳定接口（`/v2/users/@me/groups` 直接 404），只能从一条真实的群消息里抓一次。详细过程写在 [docs/qq-bridge.md](https://github.com/mogutofu/dsh-mc-server-ops/blob/main/docs/qq-bridge.md)。
+
 ## 安全模型
 
 - 仓库和 npm 包里**不含任何口令、QQ 号、记忆数据或整合包**。
@@ -160,6 +195,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 - `export-data` / `import-data` 仅服主可用；导入时会拒绝含 `..` 或绝对路径的压缩包条目（防 zip slip）。
 - `cmd`（op/ban/kick 这类后台指令）在插件层就拦下非服主，不依赖脚本再判一次。
 - `kill @a` / `kick @a` / `whitelist off` 这类“一条命令清场”的指令由静态拦截器直接拒绝，服主也发不出去；拦截在两处生效（插件层 + PowerShell 层）。
+- 群服互通用到的 AppID/AppSecret 只在内存里使用，不写日志；设置里留空时才从本机 qqbot 配置读取。桥不经过 AI，群里刷屏不会消耗 token。
 
 ## 运行环境
 
