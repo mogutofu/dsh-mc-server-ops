@@ -11,6 +11,7 @@
  */
 import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { computeWaitMs, normalizeCoalesce } from './coalesce.mjs'
 
 // ─────────────────────────── QQ 开放平台 ───────────────────────────
 
@@ -149,7 +150,9 @@ export function parseLogLine(line) {
   hit = /^([A-Za-z0-9_]{1,16}) left the game\.?$/.exec(rest)
   if (hit) return { type: 'leave', player: hit[1] }
 
-  hit = /^([A-Za-z0-9_]{1,16}) (was |drowned|blew up|hit the ground|fell|burned|died|starved|suffocated|withered|killed|slain|walked into|tried to swim|discovered)/.exec(rest)
+  // 玩家死亡：原版文案是「<名字> was …」或「<名字> died / drowned / blew up …」。
+  // 「was / got」后面排除踢人、封禁这类系统消息，避免误当成死亡刷到群里。
+  hit = /^([A-Za-z0-9_]{1,16}) (?:(?:was|got) (?!kicked\b|banned\b|whitelisted\b|muted\b|teleported\b|disconnected\b)|died\b|drowned\b|blew up\b|went up in flames\b|burned\b|froze\b|frozen\b|hit the ground\b|fell\b|starved\b|suffocated\b|withered\b|walked into\b|tried to swim\b|impaled\b|pricked\b|struck\b|doomed\b|squashed\b|obliterated\b|sniped\b|pummelled\b|killed\b|slain\b|shot\b|fireballed\b|poked\b|stung\b)/.exec(rest)
   if (hit) return { type: 'death', player: hit[1], text: cleanText(rest) }
 
   return null
@@ -273,6 +276,10 @@ export function createBridge(deps) {
   let dayKey = new Date().toISOString().slice(0, 10)
   let lastError = ''
   let lastSentAt = ''
+  // 自适应合并窗口用：最近几条聊天的到达时间、这一批是什么时候开始攒的、上一次的判定结果
+  const recentChatAt = []
+  let pendingSince = 0
+  let lastWait = null
   const stats = { chats: 0, joins: 0, leaves: 0, deaths: 0, sent: 0, dropped: 0, suppressed: 0 }
 
   function cfg() {
@@ -281,8 +288,9 @@ export function createBridge(deps) {
       enabled: c.enabled === true,
       mode: String(c.mode || 'auto'),
       groups: Array.isArray(c.groups) ? c.groups.map(String).filter(Boolean) : [],
-      events: Object.assign({ join: true, leave: true, death: false }, c.events || {}),
-      coalesceMs: Math.max(500, Number(c.coalesceMs) || 3000),
+      // 进服/退服默认不转发（会刷屏）；死亡消息默认转发
+      events: Object.assign({ join: false, leave: false, death: true }, c.events || {}),
+      coalesce: normalizeCoalesce(c.coalesce, c.coalesceMs),
       maxPerDay: Math.max(1, Number(c.maxPerDay) || 900),
       gamePrefix: String(c.gamePrefix || ''),
       stripUrls: c.stripUrls !== false,
@@ -302,8 +310,30 @@ export function createBridge(deps) {
     if (key !== dayKey) { dayKey = key; sentToday = 0 }
   }
 
+  /**
+   * 排下一次合并发送。
+   *
+   * 每来一条新消息都重算一次：最近聊得越密、在线的人越多，窗口越长；
+   * 冷场（quietMs 内没有第二条发言）直接落到 minMs，不会因为“好几小时没人说话”
+   * 把间隔算得格外长。窗口上限锁在 pendingSince + maxMs，所以持续刷屏也不会
+   * 无限往后拖。
+   */
+  function schedule(c) {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
+    if (!queue.length) return
+    const now = Date.now()
+    if (!pendingSince) pendingSince = now
+    const decision = computeWaitMs({ coalesce: c.coalesce, online: online.size, recentChatAt, now })
+    const cap = c.coalesce.mode === 'fixed' ? c.coalesce.fixedMs : c.coalesce.maxMs
+    const deadline = Math.min(pendingSince + decision.waitMs, pendingSince + cap)
+    lastWait = Object.assign({ at: new Date(now).toISOString(), pendingMs: now - pendingSince }, decision)
+    flushTimer = setTimeout(() => { void flush() }, Math.max(0, deadline - now))
+    if (flushTimer.unref) flushTimer.unref()
+  }
+
   async function flush() {
     flushTimer = null
+    pendingSince = 0
     const c = cfg()
     if (!queue.length) return
     const batch = queue
@@ -344,11 +374,12 @@ export function createBridge(deps) {
     // 自己发的消息（游戏内回显的 QQ 转发）不该再回环：以 [群] 开头的不转发
     if (evt.type === 'chat' && /^\[(群|QQ)\]/.test(evt.text)) return
 
-    queue.push(evt)
-    if (!flushTimer) {
-      flushTimer = setTimeout(() => { void flush() }, c.coalesceMs)
-      if (flushTimer.unref) flushTimer.unref()
+    if (evt.type === 'chat') {
+      recentChatAt.push(Date.now())
+      if (recentChatAt.length > c.coalesce.sampleSize) recentChatAt.shift()
     }
+    queue.push(evt)
+    schedule(c)
   }
 
   async function seedOnline() {
@@ -378,18 +409,36 @@ export function createBridge(deps) {
       if (tail) tail.stop()
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null }
       queue = []
+      pendingSince = 0
+      recentChatAt.length = 0
     },
     isRunning: () => running,
     status() {
+      const c = cfg()
       return {
         running,
-        mode: cfg().mode,
+        mode: c.mode,
         online: [...online],
         queued: queue.length,
         sentToday,
         stats: Object.assign({}, stats),
         lastError,
         lastSentAt,
+        coalesce: {
+          mode: c.coalesce.mode,
+          fixedMs: c.coalesce.fixedMs,
+          minMs: c.coalesce.minMs,
+          maxMs: c.coalesce.maxMs,
+          sampleSize: c.coalesce.sampleSize,
+          quietMs: c.coalesce.quietMs,
+          fullPlayers: c.coalesce.fullPlayers,
+          players: online.size,
+          pending: queue.length > 0,
+          waitMs: lastWait ? lastWait.waitMs : null,
+          activity: lastWait ? lastWait.activity : null,
+          gapMs: lastWait ? lastWait.gapMs : null,
+          score: lastWait ? lastWait.score : null,
+        },
       }
     },
     /** 只用于测试/调试：直接喂一条事件 */

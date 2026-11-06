@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
 		const groupStyle = { border: "1px solid rgba(127,127,127,0.22)", borderRadius: 8, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 12 }
 		const titleStyle = { fontSize: 13, fontWeight: 700, marginBottom: 2 }
 		const buttonStyle = { padding: "6px 14px", borderRadius: 6, border: "1px solid rgba(127,127,127,0.35)", background: "rgba(127,127,127,0.12)", color: "inherit", cursor: "pointer", fontSize: 13 }
+		const primaryButtonStyle = { background: "rgba(60,140,255,0.18)", borderColor: "rgba(60,140,255,0.55)", fontWeight: 600 }
 		const statusStyle = { fontSize: 12, opacity: 0.75 }
 
 		function Field({ label, hint, children }) {
@@ -45,6 +46,24 @@ window.__ModuleLoader__.load({
 				label)
 		}
 
+		function secs(ms) {
+			const n = Number(ms)
+			return Number.isFinite(n) && n >= 0 ? (n / 1000).toFixed(1) + "s" : "—"
+		}
+
+		// 把桥上报的「当前合并窗口」翻译成一句人话，设置页顶部显示
+		function describeCoalesce(c) {
+			if (!c) return ""
+			if (c.mode === "fixed") {
+				return "合并窗口：固定 " + secs(c.waitMs != null ? c.waitMs : c.fixedMs)
+			}
+			const parts = ["合并窗口：" + (c.waitMs != null ? secs(c.waitMs) : "待定")]
+			if (c.score != null) parts.push("活跃度 " + Math.round(c.score * 100) + "%")
+			if (c.gapMs != null) parts.push("最近间隔 " + secs(c.gapMs))
+			parts.push("在线 " + (c.players || 0) + " 人")
+			return parts.join(" · ")
+		}
+
 		function ConfigPanel() {
 			const [status, setStatus] = react.useState({ loading: true, error: "", saved: "", saving: false })
 			const [form, setForm] = react.useState(null)
@@ -52,7 +71,21 @@ window.__ModuleLoader__.load({
 			const [bridgeState, setBridgeState] = react.useState(null)
 			const [newOwner, setNewOwner] = react.useState("")
 
-			react.useEffect(() => { void load() }, [])
+			react.useEffect(() => {
+				void load()
+				// 只刷运行状态（在线人数、当前合并窗口），不动正在编辑的表单
+				const timer = setInterval(() => { void refreshState() }, 10000)
+				return () => clearInterval(timer)
+			}, [])
+
+			async function refreshState() {
+				try {
+					const res = await fetch(ENDPOINT, { cache: "no-store", headers: { "x-mc-ops-client": "1" } })
+					if (!res.ok) return
+					const data = await res.json()
+					if (data && data.bridgeState) setBridgeState(data.bridgeState)
+				} catch (err) { /* 状态刷不出来不影响编辑 */ }
+			}
 
 			async function load() {
 				try {
@@ -81,11 +114,20 @@ window.__ModuleLoader__.load({
 							appId: (v.bridge || {}).appId || "",
 							appSecret: (v.bridge || {}).appSecret || "",
 							events: {
-								join: ((v.bridge || {}).events || {}).join !== false,
-								leave: ((v.bridge || {}).events || {}).leave !== false,
-								death: ((v.bridge || {}).events || {}).death === true,
+								join: ((v.bridge || {}).events || {}).join === true,
+								leave: ((v.bridge || {}).events || {}).leave === true,
+								death: ((v.bridge || {}).events || {}).death !== false,
 							},
 							coalesceMs: (v.bridge || {}).coalesceMs ?? 3000,
+							coalesce: {
+								mode: ((v.bridge || {}).coalesce || {}).mode === "fixed" ? "fixed" : "auto",
+								minMs: ((v.bridge || {}).coalesce || {}).minMs ?? 1000,
+								maxMs: ((v.bridge || {}).coalesce || {}).maxMs ?? 6000,
+								sampleSize: ((v.bridge || {}).coalesce || {}).sampleSize ?? 3,
+								quietMs: ((v.bridge || {}).coalesce || {}).quietMs ?? 20000,
+								fullPlayers: ((v.bridge || {}).coalesce || {}).fullPlayers ?? 6,
+								fastMs: ((v.bridge || {}).coalesce || {}).fastMs ?? 2000,
+							},
 							maxPerDay: (v.bridge || {}).maxPerDay ?? 900,
 						},
 						vote: {
@@ -135,6 +177,11 @@ window.__ModuleLoader__.load({
 					bridge: Object.assign({}, prev.bridge, { events: Object.assign({}, prev.bridge.events, { [key]: value }) }),
 				}) : prev))
 			}
+			function patchBridgeCoalesce(key, value) {
+				setForm((prev) => (prev ? Object.assign({}, prev, {
+					bridge: Object.assign({}, prev.bridge, { coalesce: Object.assign({}, prev.bridge.coalesce, { [key]: value }) }),
+				}) : prev))
+			}
 
 			async function save() {
 				if (!form) return
@@ -147,7 +194,7 @@ window.__ModuleLoader__.load({
 					})
 					const data = await res.json()
 					if (!res.ok) throw new Error(data.error || ("HTTP " + res.status))
-					setStatus({ loading: false, error: "", saved: "已保存，马上生效", saving: false })
+					setStatus({ loading: false, error: "", saved: "已应用，马上生效", saving: false })
 				} catch (err) {
 					setStatus({ loading: false, error: String(err && err.message ? err.message : err), saved: "", saving: false })
 				}
@@ -177,7 +224,17 @@ window.__ModuleLoader__.load({
 			if (status.error && !form) return h("div", { style: { color: "#d9534f", fontSize: 13 } }, "读取失败：" + status.error)
 			if (!form) return null
 
+			// 顶部和底部各放一份，长表单不用滚到底才能应用
+			function actions() {
+				return h("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } },
+					h("button", { type: "button", style: Object.assign({}, buttonStyle, primaryButtonStyle), onClick: () => void save(), disabled: status.saving }, status.saving ? "应用中…" : "应用"),
+					h("button", { type: "button", style: buttonStyle, onClick: () => void load(), disabled: status.saving }, "重新读取"),
+					status.saved ? h("span", { style: Object.assign({}, statusStyle, { color: "#3c9a5f" }) }, status.saved) : null,
+					status.error ? h("span", { style: Object.assign({}, statusStyle, { color: "#d9534f" }) }, status.error) : null)
+			}
+
 			return h("div", { style: box },
+				actions(),
 				h("div", null,
 					h("div", { style: titleStyle }, "服主绑定"),
 					h("div", { style: hintStyle }, "填 QQ 号（openid）加服主。不知道自己 ID：在群里 @ 机器人 说「我的 ID 是多少」，它会把你消息开头 [昵称 (ID)] 里那串念给你。"),
@@ -275,11 +332,13 @@ window.__ModuleLoader__.load({
 				),
 				h("div", { style: groupStyle },
 					bridgeState
-						? h("div", { style: Object.assign({}, hintStyle, { color: bridgeState.running ? "#3c9a5f" : "#d9534f" }) },
-							(bridgeState.running ? "● 运行中" : "○ 未运行")
-							+ " · 在线 " + ((bridgeState.online || []).length) + " 人"
-							+ " · 今日已发 " + (bridgeState.sentToday || 0) + " 条"
-							+ (bridgeState.lastError ? " · ⚠ " + bridgeState.lastError : ""))
+						? h("div", { style: { display: "flex", flexDirection: "column", gap: 3 } },
+							h("div", { style: Object.assign({}, hintStyle, { color: bridgeState.running ? "#3c9a5f" : "#d9534f" }) },
+								(bridgeState.running ? "● 运行中" : "○ 未运行")
+								+ " · 在线 " + ((bridgeState.online || []).length) + " 人"
+								+ " · 今日已发 " + (bridgeState.sentToday || 0) + " 条"
+								+ (bridgeState.lastError ? " · ⚠ " + bridgeState.lastError : "")),
+							bridgeState.coalesce ? h("div", { style: hintStyle }, describeCoalesce(bridgeState.coalesce)) : null)
 						: null,
 					h(Toggle, { label: "启用群服互通", value: form.bridge.enabled, onChange: (x) => patchBridge("enabled", x) }),
 					h(Field, { label: "运行模式", hint: "auto 只有人玩的时候才转发（推荐）；on 一直转发；off 完全关闭" },
@@ -289,13 +348,31 @@ window.__ModuleLoader__.load({
 							h("option", { value: "off" }, "常关闭"))),
 					h(Field, { label: "转发到哪些群", hint: "群 openid，逗号分隔。不知道的话在群里 @ 小铜 问" },
 						h(TextInput, { value: form.bridge.groups, placeholder: "FC73DE60… ", onChange: (x) => patchBridge("groups", x) })),
-					h(Field, { label: "除聊天外还转发", hint: "聊天内容始终转发" },
+					h(Field, { label: "除聊天外还转发", hint: "聊天始终转发。进服/退服默认关（会刷屏），死亡消息默认开" },
 						h("div", { style: { display: "flex", gap: 18, flexWrap: "wrap" } },
-							h(Toggle, { label: "玩家加入", value: form.bridge.events.join, onChange: (x) => patchBridgeEvent("join", x) }),
-							h(Toggle, { label: "玩家离开", value: form.bridge.events.leave, onChange: (x) => patchBridgeEvent("leave", x) }),
-							h(Toggle, { label: "死亡消息", value: form.bridge.events.death, onChange: (x) => patchBridgeEvent("death", x) }))),
-					h(Field, { label: "合并窗口（毫秒）", hint: "这段时间内的多条游戏消息合成一条 QQ 消息，默认 3000" },
-						h(NumberInput, { value: form.bridge.coalesceMs, onChange: (x) => patchBridge("coalesceMs", x) })),
+							h(Toggle, { label: "玩家加入（默认关）", value: form.bridge.events.join, onChange: (x) => patchBridgeEvent("join", x) }),
+							h(Toggle, { label: "玩家离开（默认关）", value: form.bridge.events.leave, onChange: (x) => patchBridgeEvent("leave", x) }),
+							h(Toggle, { label: "死亡消息（默认开）", value: form.bridge.events.death, onChange: (x) => patchBridgeEvent("death", x) }))),
+					h(Field, { label: "合并窗口", hint: "多条游戏消息合成一条再发。自动：人少话稀马上发，人多话密多攒几秒" },
+						h("select", { style: inputStyle, value: form.bridge.coalesce.mode, onChange: (e) => patchBridgeCoalesce("mode", e.target.value) },
+							h("option", { value: "auto" }, "自动调整（推荐）"),
+							h("option", { value: "fixed" }, "固定窗口"))),
+					form.bridge.coalesce.mode === "fixed"
+						? h(Field, { label: "固定窗口（毫秒）", hint: "这段时间内的多条消息合成一条，默认 3000" },
+							h(NumberInput, { value: form.bridge.coalesceMs, onChange: (x) => patchBridge("coalesceMs", x) }))
+						: h("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+							h(Field, { label: "最短等待（毫秒）", hint: "冷场、人少时按这个来，默认 1000" },
+								h(NumberInput, { value: form.bridge.coalesce.minMs, onChange: (x) => patchBridgeCoalesce("minMs", x) })),
+							h(Field, { label: "最长等待（毫秒）", hint: "再热闹最多攒这么久就发，默认 6000" },
+								h(NumberInput, { value: form.bridge.coalesce.maxMs, onChange: (x) => patchBridgeCoalesce("maxMs", x) })),
+							h(Field, { label: "参考最近几条发言", hint: "用最近 2-6 条游戏内发言的间隔算节奏，默认 3" },
+								h(NumberInput, { value: form.bridge.coalesce.sampleSize, onChange: (x) => patchBridgeCoalesce("sampleSize", x) })),
+							h(Field, { label: "冷场判定（毫秒）", hint: "超过这么久没说话就算冷场，直接按最短等待；半天没人上线也不会把间隔越拖越长。默认 20000" },
+								h(NumberInput, { value: form.bridge.coalesce.quietMs, onChange: (x) => patchBridgeCoalesce("quietMs", x) })),
+							h(Field, { label: "满档在线人数", hint: "在线人数到这个值算「人多」，默认 6" },
+								h(NumberInput, { value: form.bridge.coalesce.fullPlayers, onChange: (x) => patchBridgeCoalesce("fullPlayers", x) })),
+							h(Field, { label: "满活跃间隔（毫秒）", hint: "相邻两条发言间隔小于这个值算「话密」，默认 2000" },
+								h(NumberInput, { value: form.bridge.coalesce.fastMs, onChange: (x) => patchBridgeCoalesce("fastMs", x) }))),
 					h(Field, { label: "每群每天发送上限", hint: "官方上限 1000 条/天，默认 900 留余量" },
 						h(NumberInput, { value: form.bridge.maxPerDay, onChange: (x) => patchBridge("maxPerDay", x) })),
 					h(Field, { label: "AppID", hint: "留空自动从本机 qqbot 配置读取，一般不用填" },
@@ -318,12 +395,7 @@ window.__ModuleLoader__.load({
 					h(Toggle, { label: "允许玩家游戏内广播（say）", value: form.permissions.say, onChange: (x) => patch("permissions", "say", x) }),
 					h(Toggle, { label: "允许玩家把文件发到群里", value: form.permissions.fileSend, onChange: (x) => patch("permissions", "fileSend", x) }),
 				),
-				h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
-					h("button", { type: "button", style: buttonStyle, onClick: () => void save(), disabled: status.saving }, status.saving ? "保存中…" : "保存"),
-					h("button", { type: "button", style: buttonStyle, onClick: () => void load(), disabled: status.saving }, "重新读取"),
-					status.saved ? h("span", { style: Object.assign({}, statusStyle, { color: "#3c9a5f" }) }, status.saved) : null,
-					status.error ? h("span", { style: Object.assign({}, statusStyle, { color: "#d9534f" }) }, status.error) : null,
-				),
+				actions(),
 			)
 		}
 

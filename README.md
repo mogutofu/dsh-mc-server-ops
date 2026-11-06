@@ -66,8 +66,14 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `bridge.enabled` | `false` | 是否启用群服互通（游戏聊天 → QQ 群） |
 | `bridge.mode` | `auto` | `auto` 有玩家在线才转发 / `on` 常开 / `off` 常关 |
 | `bridge.groups` | `[]` | 转发到哪些群（群 openid） |
-| `bridge.events` | `join/leave` 开、`death` 关 | 除聊天外还转发哪些事件 |
-| `bridge.coalesceMs` | `3000` | 多条游戏消息合并成一条 QQ 消息的窗口 |
+| `bridge.events` | `join/leave` 关、`death` 开 | 除聊天外还转发哪些事件 |
+| `bridge.coalesceMs` | `3000` | 固定合并窗口（`coalesce.mode=fixed` 时用） |
+| `bridge.coalesce.mode` | `auto` | 合并窗口：`auto` 按最近发言节奏 + 在线人数自动调整 / `fixed` 固定 |
+| `bridge.coalesce.minMs` / `maxMs` | `1000` / `6000` | 自动模式的最短 / 最长等待 |
+| `bridge.coalesce.sampleSize` | `3` | 用最近几条发言算节奏（2–6） |
+| `bridge.coalesce.quietMs` | `20000` | 超过这么久没说话算冷场，直接按最短等待 |
+| `bridge.coalesce.fullPlayers` | `6` | 在线人数达到这个值算「人多」 |
+| `bridge.coalesce.fastMs` | `2000` | 相邻两条发言间隔小于这个值算「话密」 |
 | `bridge.maxPerDay` | `900` | 每群每天发送上限（官方上限 1000） |
 | `bridge.appId` / `appSecret` | 空 | 留空自动从本机 qqbot 插件配置读取 |
 
@@ -80,6 +86,7 @@ dsh-mc-server-ops/
 └── ops/
     ├── command-guard.mjs   # 静态命令拦截：出网前掐掉“一条命令搞崩整个服”的类型
     ├── qq-bridge.mjs       # 群服互通：读日志 → 直连 QQ 开放平台（不经过 AI）
+    ├── coalesce.mjs        # 合并窗口计算：最近发言节奏 + 在线人数 → 等多久再发（纯函数）
     ├── rcon.mjs            # 跨平台核心：RCON、进程探测、日志、状态汇总
     ├── rcon-probe.mjs      # 极简 RCON 探测（查在线玩家）
     ├── adapters/           # 写操作适配器：local（本机脚本）/ panel（Pterodactyl）
@@ -169,14 +176,30 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 | `on` | 常开 |
 | `off` | 常关 |
 
-转发内容：玩家聊天（始终）、加入 / 离开（默认开）、死亡消息（默认关 —— 文案是本地化的，容易刷屏）。
+转发内容：玩家聊天（始终）、加入 / 离开（默认关，会刷屏）、死亡消息（默认开）。
+
+### 合并窗口怎么自动调
+
+默认 `auto`：每来一条新消息都重算一次等待时长，两个因子加权——
+
+- **最近的发言节奏**（权重 0.6）：只用 `quietMs` 内最近 2–3 条发言的相邻间隔。间隔 ≤ `fastMs` 算满活跃，≥ `quietMs` 算冷场，中间线性。
+- **在线人数**（权重 0.4）：`在线人数 / fullPlayers`，到满档算 1。
+
+结果夹在 `[minMs, maxMs]`：人少话稀（冷场、单人）基本是 1 秒内就发；人多话密最多攒 6 秒，攒成一条再发。
+
+两个刻意的设计：
+
+- **长时间没人说话不会把间隔拖长**：只用「安静窗口内」的相邻间隔算节奏，几小时前的那条发言根本不参与；窗口也没有「距上次发言多久」这类项。
+- **持续刷屏不会无限延后**：等待上限锁在「这一批开始攒」之后的 `maxMs`，到点必发。
+
+状态行会显示当前判定（例如 `合并窗口：2.4s · 活跃度 42% · 最近间隔 3.1s · 在线 2 人`），方便对着调参。
 
 实现要点：
 
 - **收** — 增量 tail `logs/latest.log`，**按字节切行**（中文是多字节，先转字符串再切会在块边界切坏字），再识别 `<玩家> 内容`、`joined the game`、`left the game`。
 - **编码** — 服务器的日志是**系统编码**（中文 Windows 上是 GBK），不是 UTF-8。解码器先按 UTF-8 试，出现替换字符 `U+FFFD` 就自动退回 GBK。这一步不做的话，中文在 QQ 里会变成 `��ôţ��`。
 - **发** — 直接 `POST https://api.bot.qq.com/v2/groups/{openid}/messages`，头是 `Authorization: QQBot <access_token>`；token 用 AppID/AppSecret 换，缓存到过期前 1 分钟。
-- **聚合** — `coalesceMs` 窗口内的多条消息合成一条。官方对群主动消息的限制是 **20 条/分钟、每群 1000 条/天**，一条游戏聊天发一条 QQ 会很快撞墙。
+- **聚合** — 多条游戏消息合成一条。默认按「最近发言节奏 + 在线人数」自动定窗口（见上一节），也可以切成固定 `coalesceMs`。官方对群主动消息的限制是 **20 条/分钟、每群 1000 条/天**，一条游戏聊天发一条 QQ 会很快撞墙。
 - **限流** — `maxPerDay`（默认 900）本地兜底，超了停发，面板状态行会显示原因。
 - **清洗** — URL 换成 `[链接]`（QQ 会拒收含 URL 的主动消息）、剥掉颜色码 `§x` 和控制字符、单条截断到 900 字。
 - **防环** — 带 `[群]` / `[QQ]` 前缀的消息不再转发，避免 QQ → 游戏 → QQ 打转。

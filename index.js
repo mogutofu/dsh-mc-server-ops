@@ -272,11 +272,22 @@ export const Config = Schema.object({
     appId: Schema.string().default('').description('QQ 机器人 AppID；留空自动从本机 qqbot 插件配置里读'),
     appSecret: Schema.string().default('').description('QQ 机器人 AppSecret；留空自动读'),
     events: Schema.object({
-      join: Schema.boolean().default(true).description('转发玩家加入'),
-      leave: Schema.boolean().default(true).description('转发玩家离开'),
-      death: Schema.boolean().default(false).description('转发死亡消息（本地化文案，容易刷屏，默认关）'),
+      join: Schema.boolean().default(false).description('转发玩家加入（默认关，容易刷屏）'),
+      leave: Schema.boolean().default(false).description('转发玩家离开（默认关，容易刷屏）'),
+      death: Schema.boolean().default(true).description('转发死亡消息（默认开）'),
     }).description('除聊天外还要转发哪些事件'),
-    coalesceMs: Schema.number().default(3000).description('多少毫秒内的多条消息合并成一条 QQ 消息'),
+    coalesceMs: Schema.number().default(3000)
+      .description('固定合并窗口（毫秒）；合并模式选「固定」时用这个值'),
+    coalesce: Schema.object({
+      mode: Schema.union(['auto', 'fixed']).default('auto')
+        .description('合并窗口：auto=按最近发言节奏和在线人数自动调整（默认）；fixed=固定用 coalesceMs'),
+      minMs: Schema.number().default(1000).description('自动模式最短等待（毫秒），冷场时用'),
+      maxMs: Schema.number().default(6000).description('自动模式最长等待（毫秒），最多攒这么久就发'),
+      sampleSize: Schema.number().default(3).description('参考最近几条发言算节奏（2-6）'),
+      quietMs: Schema.number().default(20000).description('超过这么久没说话就算冷场（毫秒）'),
+      fullPlayers: Schema.number().default(6).description('在线人数达到这个值算满档'),
+      fastMs: Schema.number().default(2000).description('相邻两条发言间隔小于这个值算满活跃（毫秒）'),
+    }).description('合并窗口自动调整：人少话稀就快发，人多话密就多攒一会儿'),
     maxPerDay: Schema.number().default(900).description('每个群每天最多发几条（官方上限 1000，留余量）'),
   }).description('群服互通'),
 })
@@ -341,7 +352,12 @@ export function apply(ctx, config) {
     panel: Object.assign({ url: '', serverId: '', clientApiKey: '' }, (config && config.panel) || {}),
     bridge: Object.assign({
       enabled: false, mode: 'auto', groups: [], appId: '', appSecret: '',
-      events: { join: true, leave: true, death: false }, coalesceMs: 3000, maxPerDay: 900,
+      events: { join: false, leave: false, death: true }, coalesceMs: 3000,
+      coalesce: {
+        mode: 'auto', minMs: 1000, maxMs: 6000, sampleSize: 3,
+        quietMs: 20000, fullPlayers: 6, fastMs: 2000,
+      },
+      maxPerDay: 900,
     }, (config && config.bridge) || {}),
   }
   const memoryConfig = {
@@ -847,6 +863,8 @@ function readBridgeState() {
       sentToday: Number(doc.sentToday) || 0,
       lastError: String(doc.lastError || ''),
       at: String(doc.at || ''),
+      // 自适应合并窗口的当前判定，给设置页显示用
+      coalesce: doc.coalesce && typeof doc.coalesce === 'object' ? doc.coalesce : null,
     }
   } catch { return null }
 }

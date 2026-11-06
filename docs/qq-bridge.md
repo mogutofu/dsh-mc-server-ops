@@ -138,7 +138,7 @@ off:   完全停（连日志 tail 都可以不跑）
 1. **被动回复**（优先）：借最近 5 分钟内的 `msg_id` 回复，免费且不限频，但**每条最多 5 次**。
 2. **主动消息**（兜底）：没有可用 `msg_id` 时直接往群里发，20 qpm / 1000 日。
 
-**聚合策略**（必须做）：3 秒窗口内的多条游戏聊天合并成一条多行消息；超长截断；撞 1000 日配额时降级为"每 30 秒合并一条"。
+**聚合策略**（必须做）：多条游戏聊天合并成一条多行消息；超长截断；撞 1000 日配额时降级为"每 30 秒合并一条"。窗口已做成自适应（最近发言节奏 + 在线人数，见 §9 的 `coalesce`），人少话稀时 1 秒左右就发。
 
 ### 5.3 防环（最容易翻车的地方）
 
@@ -222,12 +222,20 @@ bridge:
   gameToQQ: true
   qqToGame: true
   events:               # 除聊天外还要转什么
-    join: true
-    leave: true
-    death: false        # 死亡消息本地化，容易刷屏
+    join: false         # 进服默认不转（刷屏）
+    leave: false        # 退服默认不转
+    death: true         # 死亡消息默认转
   qqPrefix: "群"         # 游戏内显示成 [群] 昵称: xxx
   gamePrefix: ""         # QQ 里显示成 玩家名: xxx
-  coalesceMs: 3000       # 聚合窗口
+  coalesceMs: 3000       # 固定聚合窗口（coalesce.mode=fixed 时用）
+  coalesce:              # 自适应聚合窗口（默认 auto）
+    mode: auto           # auto | fixed
+    minMs: 1000          # 冷场/人少时的最短等待
+    maxMs: 6000          # 最热闹时最多攒这么久
+    sampleSize: 3        # 参考最近几条发言算节奏
+    quietMs: 20000       # 超过这么久没说话算冷场
+    fullPlayers: 6       # 在线人数到这个值算满档
+    fastMs: 2000         # 相邻两条间隔小于这个值算满活跃
   maxPerDay: 900         # 主动消息日配额保护（官方上限 1000）
 ```
 
