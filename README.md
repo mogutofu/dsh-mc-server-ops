@@ -1,11 +1,25 @@
 # dsh-mc-server-ops
 
-把一台 **Minecraft 服务器**托管到 [DeepSeek Harness](https://github.com/deepseek-ai) 里的插件：QQ 群里的群友可以直接查状态、看日志、绑定游戏名，服主可以启停服务器、改配置、修 KubeJS 配方。
+[![npm version](https://img.shields.io/npm/v/dsh-mc-server-ops.svg)](https://www.npmjs.com/package/dsh-mc-server-ops)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-mc-server-ops.svg)](https://www.npmjs.com/package/dsh-mc-server-ops)
+[![license](https://img.shields.io/npm/l/dsh-mc-server-ops.svg)](https://github.com/mogutofu/dsh-mc-server-ops/blob/main/LICENSE)
+[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-%E2%89%A50.2.0-blue)](https://github.com/deepseek-ai)
 
-> 插件本身只是「服务器操作 + 人设」这一层，**聊天通道由 QQ 机器人插件提供**。
-> 安装前请先装好并配置 `@tencent-connect/dsh-qqbot`（见下方「前置插件」），否则装上了也没有入口。
+**在 QQ 群里管理 Minecraft 服务器。** 服主不用开电脑、不用记命令——群里发一句话，就能查状态、启停服务器、绑白名单、投票授权；游戏聊天还能直通 QQ 群，不经过 AI、不耗 token。
+
+> 当前版本 **0.5.2** · 更新于 **2026-11-07** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
+
+## 它解决什么问题
+
+- **服主不在电脑前**：群里问一句「服务器卡吗」，直接回 TPS、在线玩家、CPU、内存、磁盘
+- **朋友想自己开服**：服务器确认关闭或假死时，群友也能重启，不用等服主
+- **改东西怕手滑**：动 world / ops\data / 白名单要 2 位群友投票，凑不满就作废
+- **群里看不到游戏里聊啥**：游戏聊天直通 QQ 群，不经过 AI、不耗 token
+- **一条命令搞崩服**：`kill @a`、`whitelist off` 这类静态拦截，服主也发不出去
 
 ## 前置插件（必须）
+
+插件本身只是「服务器操作 + 人设」这一层，**聊天通道由 QQ 机器人插件提供**。安装前请先装好并配置 `@tencent-connect/dsh-qqbot`（见下方表格），否则装上了也没有入口。
 
 | 插件 | 作用 | 获取 |
 | --- | --- | --- |
@@ -285,6 +299,29 @@ TPS 也是按服务端自动探测：`forge tps` → `tps`（Paper/Spigot）→ 
 - **跨平台**：核心已抽到纯 Node 的 `ops/rcon.mjs`。`status` / `players` / `say` / `cmd` / `logs` / `start` / `stop` / `restart` 在 Linux、macOS 上直接可用（Windows 仍走 PowerShell，CPU 等指标更全）。还剩投票、白名单、绑定、KubeJS 这些写数据的动作只在 Windows 上；在别的平台调用会明确提示，而不是报 PowerShell 找不到。
 - **投票超时**：已实现。`vote.timeoutMinutes`（默认 15）到点没凑够门槛会自动标成 `expired`，不再占「同时最多 3 个待确认投票」的名额。
 - **人设注入范围**：按会话 id 前缀判断（`session-*` 是本机界面），是启发式；如果 DSH 以后改会话 id 规则，这里要跟着调。
+
+## FAQ
+
+**这是什么？**
+一个 DSH 插件，让服主和群友在 QQ 群里直接管理 Minecraft 服务器：查状态、启停、绑白名单、投票授权、群服互通。
+
+**支持哪些服务端？**
+Paper / Spigot / Purpur / Folia / Leaves、Forge / NeoForge / Fabric / Quilt、Arclight / Mohist / Cardboard / Youer / Banner、vanilla，以及任意 `run.bat` 启动的服。插件只看端口、RCON 和进程，不假设服务端类型。
+
+**需要公网 IP 吗？**
+不需要。插件在本机连 RCON（默认 25575）和读日志，服务器不用暴露到公网；QQ 侧走官方机器人 API。
+
+**安全吗？群友会不会乱来？**
+三层：静态命令拦截（`kill @a`、`whitelist off` 这类谁都发不了）、投票放行（动 world / ops\data / 白名单要 2 位群友同意，凑不满前 1 票反对就作废）、服主名单（高危操作只有名单里的 QQ 能做）。拦截在插件层和 PowerShell 层各生效一次。
+
+**支持 Linux / macOS 吗？**
+只读操作和启停已经跨平台（`ops/rcon.mjs` 是纯 Node）；投票、白名单、绑定、KubeJS 这些写数据的动作还在 Windows 上，在别的平台调用会明确提示，不会报「找不到 PowerShell」。
+
+**和 Pterodactyl 面板什么关系？**
+`adapter=panel` 时，start / stop / restart / cmd 走 Pterodactyl 客户端 API；只读操作不经过适配器。要接 Pelican / AMP / PufferPanel 只需再写一个适配器文件。
+
+**群服互通会消耗 token 吗？**
+不会。桥直接读日志、直接调 QQ 开放平台，不创建 agent 会话、不调模型。只有群友真的问问题时才走 AI。
 
 ## License
 
