@@ -36,6 +36,7 @@
 - **配方**：`kubejs` 脚本备份 / 重载
 - **授权**：动受保护区域（world、ops\data、白名单）要 2 位群友投票；**凑满 2 票之前任何人反对就作废**
 - **人设**：默认「小铜」，名字和语气都能在设置里改
+- **游戏内 AI**：装上配套 Forge mod 后，玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）
 
 ## 安装
 
@@ -106,6 +107,9 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `bridge.coalesce.fastMs` | `50000` | 相邻两条发言间隔小于这个值算「话密」 |
 | `bridge.maxPerDay` | `900` | 每群每天发送上限（官方上限 1000） |
 | `bridge.appId` / `appSecret` | 空 | 留空自动从本机 qqbot 插件配置读取 |
+| `ai.enabled` | `true` | 是否开游戏内 `/ai` 对话（需要配套 Forge mod；只监听 `127.0.0.1`） |
+| `ai.port` | `8765` | mod 连接的本地端口 |
+| `ai.timeoutSeconds` | `60` | 等 AI 回复的超时秒数 |
 
 ## 目录结构
 
@@ -238,6 +242,20 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 群 openid 不知道怎么办：官方没有「列出机器人加入的群」的稳定接口（`/v2/users/@me/groups` 直接 404），只能从一条真实的群消息里抓一次。详细过程写在 [docs/qq-bridge.md](https://github.com/mogutofu/dsh-mc-server-ops/blob/main/docs/qq-bridge.md)。
 
+## 游戏内 AI 对话（/ai）
+
+配套 Forge mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（服务端 Forge 1.20.1-47.x）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。
+
+| 项 | 说明 |
+| --- | --- |
+| 监听 | 只听 `127.0.0.1`，公网进不来；端口默认 8765 |
+| 会话 | 每个玩家 UUID 一个会话 `mc-ai:<uuid>`，上下文连续；不是本机界面会话，按「群友」权限管 |
+| 协议 | `POST /mc-ai`，请求 JSON `{"player":"名字","uuid":"UUID","text":"内容"}` → 回复 `{"ok":true,"reply":"…"}`；HTTP 200 也可能是 `ok:false`，以 `ok` 字段为准 |
+| 配置 | `ai.enabled` / `ai.port` / `ai.timeoutSeconds`，改完立刻生效 |
+| 排障 | 回复「（小铜没说话）」通常是 agent 没拿到可用的模型路由：检查 DSH 的默认模型（`agentDefaultModel`）是否指向有效 provider；`<服务器目录>\ops\data\mc-ai.log` 会记录每次请求和真实错误 |
+
+游戏内玩家和群友一样受权限守卫限制：只读查询可以，写文件、执行命令需要服主授权；mod 侧默认每玩家 5 秒冷却，避免刷屏。
+
 ## 安全模型
 
 - 仓库和 npm 包里**不含任何口令、QQ 号、记忆数据或整合包**。
@@ -322,6 +340,9 @@ Paper / Spigot / Purpur / Folia / Leaves、Forge / NeoForge / Fabric / Quilt、A
 
 **群服互通会消耗 token 吗？**
 不会。桥直接读日志、直接调 QQ 开放平台，不创建 agent 会话、不调模型。只有群友真的问问题时才走 AI。
+
+**游戏内 /ai 需要什么？**
+这个插件 + 配套的 Forge mod [dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)，服务端装 mod 后重启即可。`/ai` 会创建 agent 会话、调用 DSH 的模型，按模型计费；玩家和群友受同一套权限守卫，不能借它绕过服务器管理规则。
 
 ## License
 

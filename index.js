@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, lstatSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -294,6 +296,13 @@ export const Config = Schema.object({
     }).description('合并窗口自动调整：人少话稀就快发，人多话密就多攒一会儿'),
     maxPerDay: Schema.number().default(900).description('每个群每天最多发几条（官方上限 1000，留余量）'),
   }).description('群服互通'),
+
+  ai: Schema.object({
+    enabled: Schema.boolean().default(true)
+      .description('允许游戏内玩家用 /ai 和小铜对话（需要配套的 Forge mod；只监听 127.0.0.1）'),
+    port: Schema.number().default(8765).description('mod 连接的端口，默认 8765'),
+    timeoutSeconds: Schema.number().default(60).description('等待 AI 回复的超时时间（秒）'),
+  }).description('游戏内 AI 对话'),
 })
 
 // ─────────────────────── 检查更新 / 自更新 ───────────────────────
@@ -569,6 +578,7 @@ export function apply(ctx, config) {
       },
       maxPerDay: 900,
     }, (config && config.bridge) || {}),
+    ai: Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60 }, (config && config.ai) || {}),
   }
   const memoryConfig = {
     get: () => liveConfig,
@@ -621,6 +631,169 @@ export function apply(ctx, config) {
       }, 10000)
       if (tick.unref) tick.unref()
       return () => { clearInterval(tick); bridge.stop() }
+    })
+  }
+
+  // ── 游戏内 AI 对话：给 Forge mod 的本地 HTTP 入口 ──
+  // 玩家在游戏里 /ai 内容 → mod POST 到 127.0.0.1:<port>/mc-ai → 这里开一个 agent 回合
+  // → 拿回复回给 mod。会话 id 形如 mc-ai:<uuid>，不是本机会话，所以走「群友」权限。
+  const aiCfg = Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60 }, (liveConfig && liveConfig.ai) || {})
+  if (aiCfg.enabled) {
+    const aiSessions = new Map()
+    const aiQueues = new Map()
+    const aiLog = (m) => {
+      try { appendFileSync(join(opsDir, 'data', 'mc-ai.log'), new Date().toISOString() + ' ' + m + '\n') } catch { }
+    }
+
+    const askAgent = async (key, text) => {
+      const agents = ctx.get('agents')
+      if (!agents || typeof agents.create !== 'function') throw new Error('DSH 没有可用的 agents 服务')
+      let agent = aiSessions.get(key)
+      if (!agent || !agents.get(key)) {
+        // agents.create 不会自动套用部署默认模型；不传 agentOptions 时，第一轮
+        // prepareStep 会抛 "has no provider/model"，turn/end 之后回复是空的。
+        // 所以从 dsh-agent-default-model 取一份 provider/model 路由传进去。
+        const defaultModel = ctx.get('agentDefaultModel')
+        const route = defaultModel && typeof defaultModel.currentSelection === 'function'
+          ? defaultModel.currentSelection()
+          : undefined
+        let handle
+        try {
+          handle = await agents.create({ sessionId: key, agentOptions: route, meta: { cwd: serverDir } })
+        } catch (createError) {
+          // 玩家之前聊过、会话已经落盘（DSH 重启后内存里的 agent 不在了）：
+          // create 会因 session id 已存在而失败，这时恢复旧会话继续聊。
+          try {
+            handle = await agents.resume({ resumeSessionId: key, agentOptions: route })
+          } catch {
+            throw createError
+          }
+        }
+        agent = handle.agent
+        aiSessions.set(key, agent)
+        // 恢复出来的会话可能记着一条旧的（甚至已经失效的）模型路由，AgentModel 会
+        // 优先用记录值。这里把当前默认路由显式写进选择，覆盖旧记录。
+        if (route && agent.model && typeof agent.model.select === 'function') {
+          try { agent.model.select(route) } catch (error) {
+            aiLog('[ai] ' + key + ' 设置模型路由失败：' + (error && error.message ? error.message : String(error)))
+          }
+        }
+      }
+      const timeoutMs = Math.max(5, Number(aiCfg.timeoutSeconds) || 60) * 1000
+      // 优先用 DSH 自己的构造函数，拿不到就手搓一个同形状的消息
+      let message = null
+      try {
+        const llm = await import('@deepseek-ai/dsh-llm')
+        if (llm && typeof llm.createUserMessage === 'function') {
+          message = llm.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+        }
+      } catch { /* 拿不到就退回手搓 */ }
+      if (!message) {
+        message = {
+          id: 'mcai-' + randomUUID(),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user' },
+          time: Date.now(),
+        }
+      }
+      const parts = []
+      let endReason = null
+      const reply = await new Promise((resolve, reject) => {
+        let off = () => { }
+        const timer = setTimeout(() => {
+          try { off() } catch { }
+          try { agent.cancel({ kind: 'hook', reason: 'in-game timeout' }) } catch { }
+          reject(new Error('AI 回复超时'))
+        }, timeoutMs)
+        off = ctx.on('session/event', (session, event) => {
+          const id = session && session.header ? String(session.header.id ?? '') : ''
+          if (id !== key) return
+          if (event.type === 'assistant/message') {
+            const content = event.data && event.data.message ? event.data.message.content : null
+            for (const block of content || []) {
+              if (block && block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+            }
+          }
+          if (event.type === 'turn/end') {
+            endReason = event.data && event.data.reason ? event.data.reason : null
+            clearTimeout(timer)
+            try { off() } catch { }
+            resolve(parts.join('\n').trim())
+          }
+        }, { global: true })
+        try { agent.followup(message) } catch (error) {
+          clearTimeout(timer)
+          try { off() } catch { }
+          reject(error)
+        }
+      })
+      if (!reply && endReason && endReason.kind === 'error') {
+        // 不要把模型/鉴权错误吞成「小铜没说话」：真实原因记进日志，也让 mod 显示出来
+        const failure = endReason.error || {}
+        const detail = String(failure.message || failure.code || '未知错误')
+        aiLog('[ai] ' + key + ' 回合失败：' + detail)
+        throw new Error('AI 请求失败：' + detail)
+      }
+      return reply
+    }
+
+    /** 同一玩家串行，避免并发打断同一个会话 */
+    const enqueue = (key, task) => {
+      const prev = aiQueues.get(key) || Promise.resolve()
+      const next = prev.then(task, task)
+      aiQueues.set(key, next.catch(() => { }))
+      return next
+    }
+
+    const aiServer = createServer((req, res) => {
+      const send = (code, obj) => {
+        try {
+          res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(obj))
+        } catch { }
+      }
+      const remote = String((req.socket && req.socket.remoteAddress) || '')
+      if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(remote)) {
+        return send(403, { ok: false, error: '只接受本机请求' })
+      }
+      if (req.method !== 'POST' || !String(req.url || '').startsWith('/mc-ai')) {
+        return send(404, { ok: false, error: 'not found' })
+      }
+      const chunks = []
+      req.on('data', (c) => chunks.push(Buffer.from(c)))
+      req.on('end', () => {
+        let body = null
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch { body = null }
+        if (!body) return send(400, { ok: false, error: '请求体不是合法 JSON' })
+        const player = String(body.player || '').slice(0, 32)
+        const uuid = String(body.uuid || player).slice(0, 64)
+        const text = String(body.text || '').trim().slice(0, 1000)
+        if (!text) return send(400, { ok: false, error: '内容不能为空' })
+        const key = 'mc-ai:' + (uuid || player)
+        const startedAt = Date.now()
+        enqueue(key, async () => {
+          try {
+            const reply = await askAgent(key, text)
+            aiLog('[ai] ' + player + ' → ' + text.slice(0, 60) + ' ⇒ ' + String(reply || '').slice(0, 60))
+            send(200, { ok: true, reply: reply || '（小铜没说话）', elapsedMs: Date.now() - startedAt })
+          } catch (error) {
+            const message = error && error.message ? error.message : String(error)
+            aiLog('[ai] ' + player + ' 失败：' + message)
+            send(200, { ok: false, error: message })
+          }
+        })
+      })
+      req.on('error', () => { try { send(400, { ok: false, error: '请求读取失败' }) } catch { } })
+    })
+
+    ctx.effect(() => {
+      aiServer.on('error', (error) => aiLog('[ai] 监听失败：' + (error && error.message ? error.message : String(error))))
+      try { aiServer.listen(aiCfg.port, '127.0.0.1') } catch (error) {
+        aiLog('[ai] 启动失败：' + (error && error.message ? error.message : String(error)))
+      }
+      aiLog('[ai] 已监听 127.0.0.1:' + aiCfg.port)
+      return () => { try { aiServer.close() } catch { } }
     })
   }
 

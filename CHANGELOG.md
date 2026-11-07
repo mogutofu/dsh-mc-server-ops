@@ -2,6 +2,18 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.5.4 — 2026-11-07
+
+- feat: 游戏内 AI 对话——配套 Forge mod 的 `/ai <内容>` 走本地 `127.0.0.1:8765/mc-ai`（只监听回环；按玩家 UUID 复用 `mc-ai:<uuid>` 会话，上下文连续，不占本机界面会话）
+- feat: 新增 `ai` 配置（`enabled` / `port` / `timeoutSeconds`），改完立刻生效
+- fix: 创建 agent 时带上默认模型路由（`agentDefaultModel.currentSelection()`）；恢复的老会话用 `agent.model.select()` 覆盖已失效的旧路由，重启 DSH 后不再出现「小铜没说话」
+- fix: 会话已落盘时 `agents.create` 失败会回退 `agents.resume`
+- fix: agent 回合出错时把真实原因写进 `mc-ai.log` 并回给 mod，不再静默吞成空回复
+
+## 0.5.3 — 2026-11-07
+
+- fix: 自更新兼容带空格的安装路径
+
 ## 0.5.2 — 2026-11-07
 
 - docs: README 重构——顶部加 badges、一句话定义、版本行、「它解决什么问题」；末尾新增 7 条 FAQ
