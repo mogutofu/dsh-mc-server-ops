@@ -7,3 +7,6 @@ ops/data/
 .env.*
 *.zip
 *.jar
+
+# 推广稿/发布目标，不进仓库
+content/

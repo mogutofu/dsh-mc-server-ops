@@ -208,6 +208,8 @@ export const inject = ['tools']
 export { isProtectedPath, setProtectedPaths }
 // 诊断/测试用：版本比较与「查最新版本」
 export { compareVersions, checkLatestVersion }
+// 诊断/测试用：自更新用到的两个内部函数
+export { runCommand, findProfileDir }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 // 跨平台的只读动作：Windows 上走 PowerShell（信息更全），其它平台走 Node 核心
@@ -404,14 +406,26 @@ function findPnpmRunner() {
   return candidates.find((p) => existsSync(p)) || ''
 }
 
+function quoteWinArg(value) {
+  const s = String(value)
+  return /[\s"&|<>^]/.test(s) ? '"' + s.replace(/"/g, '\\"') + '"' : s
+}
+
 function runCommand(file, args, timeoutMs) {
   return new Promise((resolve) => {
     let child
     try {
-      const isCmd = /\.cmd$/i.test(file)
-      child = isCmd
-        ? spawn('cmd.exe', ['/c', file, ...args], { windowsHide: true })
-        : spawn(file, args, { windowsHide: true })
+      if (/\.(cmd|bat)$/i.test(file)) {
+        // cmd.exe 会把整条命令重新解析一遍：路径里有空格（Program Files）时必须自己加引号，
+        // 否则它会把 "C:\Program" 当成命令。
+        const line = [quoteWinArg(file), ...args.map(quoteWinArg)].join(' ')
+        child = spawn('cmd.exe', ['/d', '/s', '/c', '"' + line + '"'], {
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+        })
+      } else {
+        child = spawn(file, args, { windowsHide: true })
+      }
     } catch (error) {
       resolve({ ok: false, text: String(error && error.message ? error.message : error) })
       return
