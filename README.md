@@ -41,6 +41,22 @@ dsh plugin add /path/to/dsh-mc-server-ops
 
 安装后重启 DSH，在「设置 → 插件 → mc-server-ops」里填服务器目录。
 
+## 检查更新
+
+设置面板最上面有一条更新栏，**强制开启、没有开关**：
+
+```
+当前版本号为 0.5.1                        [检查更新]
+[新版本 v0.6.0]                           [检查更新]
+```
+
+- 面板一打开就自动查一次，**npm 优先**（`registry.npmjs.org/<包名>/latest`），npm 不通才问 GitHub 的 `releases/latest`。
+- 有新版本时按钮变成可点的「新版本 vX」。点一下自动更新：先走 npm，失败再走 GitHub 的 tag tarball，都失败才提示「下载失败，请手动更新」。
+- 没有新版本时显示纯文本「当前版本号为 X」，不可点击。
+- 右边的「检查更新」是手动重查，结果会以文字提示（「已经是最新版本」/「发现新版本」）。
+
+两个前提：更新用的是 DSH 自带的 pnpm，所以要有写 profile 目录的权限；如果是 `link:` 本地安装（开发模式），自动更新会断开链接，插件会直接提示手动更新。
+
 ## 配置（设置界面可改）
 
 | 字段 | 默认 | 说明 |
@@ -63,17 +79,17 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `vote.timeoutMinutes` | `15` | 多久没凑够门槛自动作废 |
 | `vote.vetoEnabled` | `true` | 是否允许一票否决；关掉后反对票只记录、不作废 |
 | `vote.protectedPaths` | `world, ops/data, whitelist` | 改动这些位置需要群友投票放行 |
-| `bridge.enabled` | `false` | 是否启用群服互通（游戏聊天 → QQ 群） |
+| `bridge.enabled` | `true` | 是否启用群服互通（游戏聊天 → QQ 群） |
 | `bridge.mode` | `auto` | `auto` 有玩家在线才转发 / `on` 常开 / `off` 常关 |
 | `bridge.groups` | `[]` | 转发到哪些群（群 openid） |
-| `bridge.events` | `join/leave` 关、`death` 开 | 除聊天外还转发哪些事件 |
+| `bridge.events` | 三项都关 | 除聊天外还转发哪些事件（进出服和死亡默认不转，防刷屏） |
 | `bridge.coalesceMs` | `3000` | 固定合并窗口（`coalesce.mode=fixed` 时用） |
 | `bridge.coalesce.mode` | `auto` | 合并窗口：`auto` 按最近发言节奏 + 在线人数自动调整 / `fixed` 固定 |
-| `bridge.coalesce.minMs` / `maxMs` | `1000` / `6000` | 自动模式的最短 / 最长等待 |
+| `bridge.coalesce.minMs` / `maxMs` | `1000` / `60000` | 自动模式的最短 / 最长等待 |
 | `bridge.coalesce.sampleSize` | `3` | 用最近几条发言算节奏（2–6） |
-| `bridge.coalesce.quietMs` | `20000` | 超过这么久没说话算冷场，直接按最短等待 |
-| `bridge.coalesce.fullPlayers` | `6` | 在线人数达到这个值算「人多」 |
-| `bridge.coalesce.fastMs` | `2000` | 相邻两条发言间隔小于这个值算「话密」 |
+| `bridge.coalesce.quietMs` | `60000` | 超过这么久没说话算冷场，直接按最短等待 |
+| `bridge.coalesce.fullPlayers` | `2` | 在线人数达到这个值算「人多」 |
+| `bridge.coalesce.fastMs` | `50000` | 相邻两条发言间隔小于这个值算「话密」 |
 | `bridge.maxPerDay` | `900` | 每群每天发送上限（官方上限 1000） |
 | `bridge.appId` / `appSecret` | 空 | 留空自动从本机 qqbot 插件配置读取 |
 

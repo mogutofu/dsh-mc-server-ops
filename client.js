@@ -5,6 +5,7 @@ window.__ModuleLoader__.load({
 		const h = react.createElement
 		const PACKAGE_NAME = "dsh-mc-server-ops"
 		const ENDPOINT = "/mc-ops/config"
+		const UPDATE_ENDPOINT = "/mc-ops/update"
 
 		const box = { display: "flex", flexDirection: "column", gap: 10 }
 		const row = { display: "flex", flexDirection: "column", gap: 4 }
@@ -70,6 +71,7 @@ window.__ModuleLoader__.load({
 			const [owners, setOwners] = react.useState([])
 			const [bridgeState, setBridgeState] = react.useState(null)
 			const [newOwner, setNewOwner] = react.useState("")
+			const [upd, setUpd] = react.useState({ checking: true, info: null, busy: false, msg: "" })
 
 			react.useEffect(() => {
 				void load()
@@ -77,6 +79,47 @@ window.__ModuleLoader__.load({
 				const timer = setInterval(() => { void refreshState() }, 10000)
 				return () => clearInterval(timer)
 			}, [])
+
+			react.useEffect(() => { void checkUpdate(false) }, [])
+
+			// 强制开启的更新检查：面板一打开就问一次 npm（失败再问 GitHub）
+			async function checkUpdate(manual) {
+				setUpd((prev) => Object.assign({}, prev, { checking: true, msg: manual ? "" : prev.msg }))
+				try {
+					const res = await fetch(UPDATE_ENDPOINT, { cache: "no-store", headers: { "x-mc-ops-client": "1" } })
+					const data = await res.json()
+					if (!res.ok) throw new Error(data.error || ("HTTP " + res.status))
+					setUpd({
+						checking: false,
+						info: data,
+						busy: false,
+						msg: manual
+							? (data.hasUpdate
+								? "发现新版本 v" + data.latest + "（当前 " + data.current + "）"
+								: "已经是最新版本（" + data.current + "）")
+							: "",
+					})
+				} catch (err) {
+					setUpd({ checking: false, info: null, busy: false, msg: "检查更新失败：" + String(err && err.message ? err.message : err) })
+				}
+			}
+
+			async function doUpdate() {
+				const info = upd.info
+				if (!info || !info.latest) return
+				setUpd((prev) => Object.assign({}, prev, { busy: true, msg: "正在下载 v" + info.latest + " …" }))
+				try {
+					const res = await fetch(UPDATE_ENDPOINT, {
+						method: "POST",
+						headers: { "content-type": "application/json", "x-mc-ops-client": "1" },
+						body: JSON.stringify({ version: info.latest }),
+					})
+					const data = await res.json()
+					setUpd((prev) => Object.assign({}, prev, { busy: false, msg: data.text || (res.ok ? "已更新" : "更新失败，请手动更新。") }))
+				} catch (err) {
+					setUpd((prev) => Object.assign({}, prev, { busy: false, msg: "下载失败，请手动更新。" }))
+				}
+			}
 
 			async function refreshState() {
 				try {
@@ -233,7 +276,33 @@ window.__ModuleLoader__.load({
 					status.error ? h("span", { style: Object.assign({}, statusStyle, { color: "#d9534f" }) }, status.error) : null)
 			}
 
+			const updateRow = h("div", {
+				style: {
+					display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+					padding: "10px 12px", borderRadius: 8, background: "rgba(127,127,127,0.10)", marginBottom: 12,
+				},
+			},
+				upd.checking
+					? h("span", { style: hintStyle }, "正在检查更新…")
+					: (upd.info && upd.info.hasUpdate)
+						? h("button", {
+							type: "button",
+							style: Object.assign({}, buttonStyle, { background: "#2f7de1", color: "#fff", border: "1px solid #2f7de1", fontWeight: 600 }),
+							disabled: upd.busy,
+							onClick: () => void doUpdate(),
+						}, upd.busy ? "更新中…" : ("新版本 v" + upd.info.latest))
+						: h("span", { style: hintStyle }, "当前版本号为 " + ((upd.info && upd.info.current) || "?")),
+				h("button", {
+					type: "button",
+					style: Object.assign({}, buttonStyle, { padding: "3px 10px", fontSize: 12 }),
+					disabled: upd.busy || upd.checking,
+					onClick: () => void checkUpdate(true),
+				}, "检查更新"),
+				upd.msg ? h("span", { style: hintStyle }, upd.msg) : null,
+			)
+
 			return h("div", { style: box },
+				updateRow,
 				actions(),
 				h("div", null,
 					h("div", { style: titleStyle }, "服主绑定"),

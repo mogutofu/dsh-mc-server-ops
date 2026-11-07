@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, lstatSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
@@ -206,6 +206,8 @@ export const name = 'mc-server-ops'
 export const inject = ['tools']
 // 诊断/测试用：判断某个路径是否落在受保护区域，以及临时改一份受保护清单
 export { isProtectedPath, setProtectedPaths }
+// 诊断/测试用：版本比较与「查最新版本」
+export { compareVersions, checkLatestVersion }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 // 跨平台的只读动作：Windows 上走 PowerShell（信息更全），其它平台走 Node 核心
@@ -263,7 +265,7 @@ export const Config = Schema.object({
   }).description('Pterodactyl 面板（adapter 选 panel 时才用）'),
 
   bridge: Schema.object({
-    enabled: Schema.boolean().default(false)
+    enabled: Schema.boolean().default(true)
       .description('群服互通：把游戏内聊天直接转发到 QQ 群。不经过 AI，不消耗 token'),
     mode: Schema.union(['auto', 'on', 'off']).default('auto')
       .description('auto=有玩家在线才转发（默认）；on=常开；off=常关'),
@@ -274,7 +276,7 @@ export const Config = Schema.object({
     events: Schema.object({
       join: Schema.boolean().default(false).description('转发玩家加入（默认关，容易刷屏）'),
       leave: Schema.boolean().default(false).description('转发玩家离开（默认关，容易刷屏）'),
-      death: Schema.boolean().default(true).description('转发死亡消息（默认开）'),
+      death: Schema.boolean().default(false).description('转发死亡消息（默认关）'),
     }).description('除聊天外还要转发哪些事件'),
     coalesceMs: Schema.number().default(3000)
       .description('固定合并窗口（毫秒）；合并模式选「固定」时用这个值'),
@@ -282,15 +284,209 @@ export const Config = Schema.object({
       mode: Schema.union(['auto', 'fixed']).default('auto')
         .description('合并窗口：auto=按最近发言节奏和在线人数自动调整（默认）；fixed=固定用 coalesceMs'),
       minMs: Schema.number().default(1000).description('自动模式最短等待（毫秒），冷场时用'),
-      maxMs: Schema.number().default(6000).description('自动模式最长等待（毫秒），最多攒这么久就发'),
+      maxMs: Schema.number().default(60000).description('自动模式最长等待（毫秒），最多攒这么久就发'),
       sampleSize: Schema.number().default(3).description('参考最近几条发言算节奏（2-6）'),
-      quietMs: Schema.number().default(20000).description('超过这么久没说话就算冷场（毫秒）'),
-      fullPlayers: Schema.number().default(6).description('在线人数达到这个值算满档'),
-      fastMs: Schema.number().default(2000).description('相邻两条发言间隔小于这个值算满活跃（毫秒）'),
+      quietMs: Schema.number().default(60000).description('超过这么久没说话就算冷场（毫秒）'),
+      fullPlayers: Schema.number().default(2).description('在线人数达到这个值算满档'),
+      fastMs: Schema.number().default(50000).description('相邻两条发言间隔小于这个值算满活跃（毫秒）'),
     }).description('合并窗口自动调整：人少话稀就快发，人多话密就多攒一会儿'),
     maxPerDay: Schema.number().default(900).description('每个群每天最多发几条（官方上限 1000，留余量）'),
   }).description('群服互通'),
 })
+
+// ─────────────────────── 检查更新 / 自更新 ───────────────────────
+
+const PKG_NAME = 'dsh-mc-server-ops'
+const GH_REPO = 'mogutofu/dsh-mc-server-ops'
+const NPM_LATEST_URL = 'https://registry.npmjs.org/' + PKG_NAME + '/latest'
+const GH_LATEST_URL = 'https://api.github.com/repos/' + GH_REPO + '/releases/latest'
+
+function homeDir() { return process.env.USERPROFILE || process.env.HOME || '' }
+
+/** 当前安装的版本（读包内 package.json）。 */
+function localVersion() {
+  try {
+    return String(JSON.parse(readFileSync(join(SCRIPT_DIR, 'package.json'), 'utf8')).version || '')
+  } catch { return '' }
+}
+
+/** 语义化版本比较：a>b 返回 1，a<b 返回 -1，相等 0。只处理 x.y.z[-pre]。 */
+function compareVersions(a, b) {
+  const parse = (v) => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v || '').trim())
+    return m ? { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] || '' } : null
+  }
+  const pa = parse(a), pb = parse(b)
+  if (!pa || !pb) return 0
+  for (let i = 0; i < 3; i++) {
+    if (pa.n[i] !== pb.n[i]) return pa.n[i] > pb.n[i] ? 1 : -1
+  }
+  if (pa.pre === pb.pre) return 0
+  if (!pa.pre) return 1
+  if (!pb.pre) return -1
+  return pa.pre > pb.pre ? 1 : -1
+}
+
+async function fetchJson(url, ms = 8000) {
+  const res = await fetch(url, {
+    headers: { 'user-agent': PKG_NAME, accept: 'application/json' },
+    signal: AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined,
+  })
+  if (!res.ok) throw new Error('HTTP ' + res.status)
+  return res.json()
+}
+
+/** 依次问 npm / GitHub，返回最新版本。npm 优先。 */
+async function checkLatestVersion() {
+  const current = localVersion()
+  const errors = []
+  let latest = ''
+  let source = ''
+  try {
+    const doc = await fetchJson(NPM_LATEST_URL)
+    latest = String(doc.version || '')
+    if (latest) source = 'npm'
+  } catch (error) {
+    errors.push('npm ' + (error && error.message ? error.message : String(error)))
+  }
+  if (!latest) {
+    try {
+      const doc = await fetchJson(GH_LATEST_URL)
+      latest = String(doc.tag_name || '').replace(/^v/i, '')
+      if (latest) source = 'github'
+    } catch (error) {
+      errors.push('github ' + (error && error.message ? error.message : String(error)))
+    }
+  }
+  return {
+    current,
+    latest,
+    source,
+    hasUpdate: !!latest && compareVersions(latest, current) > 0,
+    error: latest ? '' : ('检查失败：' + errors.join('；')),
+  }
+}
+
+/** 找到装着本插件的 profile 目录。 */
+function findProfileDir() {
+  const self = SCRIPT_DIR.replace(/\\/g, '/')
+  const m = /\/profiles\/([^/]+)\/node_modules\//.exec(self)
+  const home = homeDir()
+  if (m && home) return { name: m[1], dir: join(home, '.dsh', 'profiles', m[1]) }
+  const root = home ? join(home, '.dsh', 'profiles') : ''
+  if (!root || !existsSync(root)) return null
+  try {
+    for (const name of readdirSync(root)) {
+      const file = join(root, name, 'cordis.patch.yml')
+      if (!existsSync(file)) continue
+      if (readFileSync(file, 'utf8').includes(PKG_NAME)) return { name, dir: join(root, name) }
+    }
+  } catch { /* 扫不动就算了 */ }
+  return null
+}
+
+function findDshCli() {
+  const dir = dirname(process.execPath)
+  const candidates = [
+    join(dir, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+    join(dir, 'resources', 'runtime', 'cli', 'bin', 'dsh'),
+  ]
+  return candidates.find((p) => existsSync(p)) || ''
+}
+
+function findPnpmRunner() {
+  const dir = dirname(process.execPath)
+  const home = homeDir()
+  const candidates = [
+    join(dir, 'resources', 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'),
+    join(home, '.dsh', 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'),
+  ]
+  return candidates.find((p) => existsSync(p)) || ''
+}
+
+function runCommand(file, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      const isCmd = /\.cmd$/i.test(file)
+      child = isCmd
+        ? spawn('cmd.exe', ['/c', file, ...args], { windowsHide: true })
+        : spawn(file, args, { windowsHide: true })
+    } catch (error) {
+      resolve({ ok: false, text: String(error && error.message ? error.message : error) })
+      return
+    }
+    const out = []
+    const err = []
+    const timer = setTimeout(() => { try { child.kill() } catch { } }, timeoutMs)
+    child.stdout.on('data', (d) => out.push(Buffer.from(d)))
+    child.stderr.on('data', (d) => err.push(Buffer.from(d)))
+    child.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, text: String(e && e.message ? e.message : e) }) })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const text = (Buffer.concat(err).toString('utf8') + '\n' + Buffer.concat(out).toString('utf8')).trim()
+      resolve({ ok: code === 0, text: text.slice(-600) })
+    })
+  })
+}
+
+/**
+ * 执行更新：先 npm，失败再 GitHub 的 tag tarball。
+ * 本机是 link: 安装（开发模式）时不动，避免把链接换掉。
+ */
+async function performUpdate(targetVersion) {
+  const version = String(targetVersion || '').trim()
+  if (!version) return { ok: false, text: '没有可用的版本号，请先点「检查更新」。' }
+  const profile = findProfileDir()
+  if (!profile) return { ok: false, text: '找不到安装目录，请手动更新。' }
+  try {
+    const target = join(profile.dir, 'node_modules', PKG_NAME)
+    if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+      return { ok: false, text: '当前是本地链接安装（开发模式），自动更新会断开链接，请手动更新。' }
+    }
+  } catch { /* 判断不了就继续尝试 */ }
+
+  const attempts = [
+    { label: 'npm', spec: PKG_NAME + '@' + version },
+    { label: 'github', spec: 'https://codeload.github.com/' + GH_REPO + '/tar.gz/refs/tags/v' + version },
+  ]
+  const cli = findDshCli()
+  const pnpm = findPnpmRunner()
+  if (!cli && !pnpm) return { ok: false, text: '找不到 DSH 自带的包管理器，请手动更新。' }
+
+  let lastError = ''
+  for (const attempt of attempts) {
+    const result = cli
+      ? await runCommand(cli, ['plugin', '--profile', profile.name, 'add', attempt.spec], 240000)
+      : await runCommand(process.execPath, ['--expose-internals', pnpm, 'add', attempt.spec, '--dir', profile.dir], 240000)
+    if (result.ok) {
+      return { ok: true, text: '已更新到 ' + version + '（来源 ' + attempt.label + '），重启 DSH 生效。' }
+    }
+    lastError = attempt.label + ': ' + String(result.text || '').replace(/\s+/g, ' ').slice(0, 160)
+  }
+  return { ok: false, text: '下载失败，请手动更新。（' + lastError + '）' }
+}
+
+/** /mc-ops/update：GET 检查版本，POST 执行更新。 */
+async function handleUpdateRoute(req, res) {
+  const send = (code, obj) => {
+    try {
+      res.statusCode = code
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(JSON.stringify(obj))
+    } catch { }
+  }
+  if (String(req.headers['x-mc-ops-client'] || '') !== '1') return send(403, { error: '只接受来自设置面板的请求' })
+  if (req.method === 'GET') {
+    try { return send(200, await checkLatestVersion()) }
+    catch (error) { return send(500, { error: String(error && error.message ? error.message : error) }) }
+  }
+  if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
+  const body = await readJsonBody(req)
+  if (!body) return send(400, { error: '请求体不是合法 JSON' })
+  const result = await performUpdate(body.version)
+  return send(result.ok ? 200 : 500, result)
+}
 
 export function apply(ctx, config) {
   const perms = Object.assign({
@@ -423,6 +619,11 @@ export function apply(ctx, config) {
         kind: 'prefix',
         path: '/mc-ops/config',
         handler: (req, res) => handleConfigRoute(req, res, { settings: scope.get('settings'), editor: scope.get('configEditor') }, memoryConfig),
+      }))
+      scope.effect(() => webServer.register({
+        kind: 'prefix',
+        path: '/mc-ops/update',
+        handler: (req, res) => handleUpdateRoute(req, res),
       }))
     })
   }
