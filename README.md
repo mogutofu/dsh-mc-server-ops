@@ -96,7 +96,7 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `vote.protectedPaths` | `world, ops/data, whitelist` | 改动这些位置需要群友投票放行 |
 | `bridge.enabled` | `true` | 是否启用群服互通（游戏聊天 → QQ 群） |
 | `bridge.mode` | `auto` | `auto` 有玩家在线才转发 / `on` 常开 / `off` 常关 |
-| `bridge.groups` | `[]` | 转发到哪些群（群 openid） |
+| `bridge.groups` | `[]` | 转发到哪些群（群 openid）；留空 = 自动用上次记住/最近捕获的群，重装插件不会哑 |
 | `bridge.events` | 三项都关 | 除聊天外还转发哪些事件（进出服和死亡默认不转，防刷屏） |
 | `bridge.coalesceMs` | `3000` | 固定合并窗口（`coalesce.mode=fixed` 时用） |
 | `bridge.coalesce.mode` | `auto` | 合并窗口：`auto` 按最近发言节奏 + 在线人数自动调整 / `fixed` 固定 |
@@ -241,6 +241,8 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 配置在设置面板的「群服互通」里，**改完立刻生效**（不用重启），状态行会显示「运行中 / 在线几人 / 今日已发几条 / 错误原因」。
 
 群 openid 不知道怎么办：官方没有「列出机器人加入的群」的稳定接口（`/v2/users/@me/groups` 直接 404），只能从一条真实的群消息里抓一次。详细过程写在 [docs/qq-bridge.md](https://github.com/mogutofu/dsh-mc-server-ops/blob/main/docs/qq-bridge.md)。
+
+插件会自动记住用过的群：正常转发过一次后，群 openid 会存到 `ops/data/bridge-groups.json`；`bridge.groups` 留空或因为重装插件被重置时，自动用上次记住的群，再退回最近捕获的群（`ops/data/qq-keys.txt`），所以**重装/升级插件不会再让群服互通断掉**。状态和日志里会标出来源（`config` / `remembered` / `captured`）。
 
 ## 游戏内 AI 对话（/ai）
 

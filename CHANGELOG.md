@@ -2,6 +2,13 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.1 — 2026-11-08
+
+- fix: 重装/升级插件后 `bridge.groups` 丢失导致群服互通沉默——群 openid 现在会持久化到 `ops/data/bridge-groups.json`；配置里 groups 为空时自动用「上次记住的群」，再退到「最近捕获的群」（`ops/data/qq-keys.txt`）
+- fix: 群目标为空/自动恢复时写 `bridge.log`（`群目标：…（来源：config / remembered / captured）`），`bridge-state.json` 增加 `groups` 与 `groupsSource`，排查不再靠猜
+- fix: `mc_server bridge-groups` 在 QQ 接口 404（不支持列群）时回退到本地记录/最近捕获的群，而不是直接报错
+- docs: README/docs 说明群 openid 的自动记忆与恢复；设置面板「转发到哪些群」留空即自动
+
 ## 0.6.0 — 2026-11-08
 
 - feat: 游戏内 `/ai` 支持附件——配套 Forge mod 1.1.0 可在请求里带 1 个图片或文件附件；`POST /mc-ai` 新增可选 `attachments` 数组，不带时行为和旧版完全一致

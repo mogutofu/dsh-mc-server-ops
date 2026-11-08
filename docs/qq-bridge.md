@@ -218,7 +218,7 @@ ctx.set('qqbot', { bot, manager })          // 插件能拿到发消息句柄
 bridge:
   enabled: true
   mode: auto            # auto | on | off
-  groups: []            # 白名单群 openid，空 = 全部
+  groups: []            # 目标群 openid；空 = 自动（上次记住 → 最近捕获），不会转发到未记录的群
   gameToQQ: true
   qqToGame: true
   events:               # 除聊天外还要转什么
@@ -256,3 +256,4 @@ P0 按本文档实现，落在 `ops/qq-bridge.mjs`，实测通过：
 - 群 openid 的获取方式：官方 `/v2/users/@me/groups` 返回 `404 不支持的调用`（`api.sgroup.qq.com` 和 `api.bot.qq.com` 都一样），所以采用「临时给 qqbot 的 `inbound.js` 加两行，把 `scope + peerId` 写进 `ops/data/qq-keys.txt`，群友 @ 一次机器人即可」的办法抓一次。抓到后永久写进配置，不再需要。
 - 日志编码是 GBK（系统编码），不是 UTF-8 —— 这是本项目踩到最大的一个坑，中文会变成 `��ôţ��`。`decodeLogBytes()` 先用 UTF-8 解，出现 `U+FFFD` 自动退回 GBK。
 - 主动消息发送权限正常（群里有 `<玩家> r11` 这种实测消息），20 qpm / 1000 日 的配额没有触发。
+- 0.6.1 起群 openid 会持久化到 `ops/data/bridge-groups.json`：配置里的 `groups` 为空时自动回退（上次记住 → 最近捕获），重装/升级插件丢失配置不再导致群服互通沉默。`mc_server bridge-groups` 在官方接口 404 时也会回退到本地记录。

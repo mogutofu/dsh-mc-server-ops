@@ -188,7 +188,7 @@ const DESCRIPTION = [
   '- vote-status：查看投票进度（可带编号）',
   '- export-data：把 ops\\data（绑定、投票、服主名单、口令）打成 zip，arg 为目标路径，仅服主',
   '- import-data：从 zip 恢复 ops\\data，arg 为 zip 路径，仅服主',
-  '- bridge-groups：列出机器人加入的 QQ 群（群名 + 群 openid），配置群服互通时用来填 groups，仅服主',
+  '- bridge-groups：列出机器人加入的 QQ 群（群名 + 群 openid），配置群服互通时用来填 groups；QQ 接口列不出来时回退到本地记录/最近捕获的群，仅服主',
   '',
   '玩家可以改服务器目录下除敏感区（ops\\data、world、白名单、eula、jar/exe/dll、密钥）之外的文件：kubejs 配方、config/defaultconfigs 配置、server.properties 等，write/edit 直接放行；改之前先备份，改完按需 reload。',
   '玩家不能改 kubejs 目录以外的任何文件。',
@@ -722,6 +722,75 @@ export function apply(ctx, config) {
     panel: (liveConfig && liveConfig.panel) || {},
   })
 
+  // ── 群服互通的目标群：配置 → 上次记住 → 本地捕获（qq-keys.txt）三层兜底 ──
+  // 插件配置存在 profile 的 cordis.patch.yml 里；重装/升级插件时 DSH 会重建这条配置行，
+  // 用户填的 bridge.groups 会丢。群 openid 本身可以本地记住，所以这里做持久化 + 自动恢复，
+  // 避免「重装一次插件，群服互通就哑了」。
+  const BRIDGE_GROUPS_FILE = join(opsDir, 'data', 'bridge-groups.json')
+  function readBridgeGroupList(list) {
+    return Array.isArray(list) ? list.map((x) => String(x || '').trim()).filter(Boolean) : []
+  }
+  function rememberBridgeGroups(groups) {
+    const list = [...new Set(readBridgeGroupList(groups))]
+    if (!list.length) return
+    try {
+      mkdirSync(join(opsDir, 'data'), { recursive: true })
+      writeFileSync(BRIDGE_GROUPS_FILE, JSON.stringify({ at: new Date().toISOString(), groups: list }, null, 2) + '\n', 'utf8')
+    } catch (error) { }
+  }
+  function loadRememberedBridgeGroups() {
+    try {
+      const doc = JSON.parse(readFileSync(BRIDGE_GROUPS_FILE, 'utf8'))
+      return readBridgeGroupList(Array.isArray(doc) ? doc : doc && doc.groups)
+    } catch (error) { return [] }
+  }
+  function loadCapturedBridgeGroups(limit = 3) {
+    // qqbot 的 inbound.js 抓到群消息时会把 openid 记进 ops/data/qq-keys.txt（每行「时间 group OPENID」）
+    try {
+      const text = readFileSync(join(opsDir, 'data', 'qq-keys.txt'), 'utf8')
+      const seen = []
+      for (const line of text.split(/\r?\n/)) {
+        const match = /\bgroup\s+([0-9A-Za-z]{16,64})\b/.exec(line)
+        if (!match) continue
+        const openid = match[1]
+        const index = seen.indexOf(openid)
+        if (index !== -1) seen.splice(index, 1)
+        seen.push(openid)
+      }
+      return seen.slice(-limit).reverse()
+    } catch (error) { return [] }
+  }
+  let bridgeGroupsState = { groups: [], source: 'none' }
+  let lastBridgeGroupsLog = ''
+  function resolveBridgeGroups(rawBridge) {
+    const configured = readBridgeGroupList(rawBridge && rawBridge.groups)
+    if (configured.length) {
+      rememberBridgeGroups(configured)
+      bridgeGroupsState = { groups: configured, source: 'config' }
+    } else {
+      const remembered = loadRememberedBridgeGroups()
+      if (remembered.length) {
+        bridgeGroupsState = { groups: remembered, source: 'remembered' }
+      } else {
+        const captured = loadCapturedBridgeGroups()
+        if (captured.length) {
+          rememberBridgeGroups(captured)
+          bridgeGroupsState = { groups: captured, source: 'captured' }
+        } else {
+          bridgeGroupsState = { groups: [], source: 'none' }
+        }
+      }
+    }
+    const key = bridgeGroupsState.source + ':' + bridgeGroupsState.groups.join(',')
+    if (key !== lastBridgeGroupsLog) {
+      lastBridgeGroupsLog = key
+      try {
+        appendFileSync(join(opsDir, 'data', 'bridge.log'), new Date().toISOString() + ' [bridge] 群目标：' + (bridgeGroupsState.groups.join(', ') || '（空）') + '（来源：' + bridgeGroupsState.source + '）\n')
+      } catch (error) { }
+    }
+    return bridgeGroupsState
+  }
+
   // ── 群服互通：游戏聊天 → QQ 群（不经过 AI，不产生 token）──
   // 常驻创建、常驻运行：是否真的转发由 liveConfig.bridge.enabled 决定，
   // 这样在面板里打开开关立刻生效，不用再重启一次。
@@ -734,17 +803,24 @@ export function apply(ctx, config) {
       serverDir,
       appId,
       appSecret,
-      readConfig: () => (liveConfig && liveConfig.bridge) || {},
+      readConfig: () => {
+        const raw = (liveConfig && liveConfig.bridge) || {}
+        const resolved = resolveBridgeGroups(raw)
+        return Object.assign({}, raw, { groups: resolved.groups, groupsSource: resolved.source })
+      },
       log: (m) => {
         try { appendFileSync(join(opsDir, 'data', 'bridge.log'), new Date().toISOString() + ' ' + m + '\n') } catch { }
       },
     })
     ctx.effect(() => {
+      resolveBridgeGroups((liveConfig && liveConfig.bridge) || {})
       void bridge.start()
       const tick = setInterval(() => {
+        resolveBridgeGroups((liveConfig && liveConfig.bridge) || {})
         writeBridgeState(serverDir, Object.assign(
           { appId: appId ? appId.slice(0, 3) + '***' : '', hasSecret: !!appSecret },
           bridge.status(),
+          { groups: bridgeGroupsState.groups, groupsSource: bridgeGroupsState.source },
         ))
       }, 10000)
       if (tick.unref) tick.unref()
@@ -1065,10 +1141,20 @@ export function apply(ctx, config) {
         try {
           const groups = await new QqApi({ appId, appSecret }).listGroups()
           if (!groups.length) return { ok: true, text: '机器人还没加入任何群（或者没有「群管理」权限，拿不到群列表）。' }
+          rememberBridgeGroups(groups.map((g) => g.openid))
           return { ok: true, text: groups.map((g) => g.name + '\n  ' + g.openid).join('\n') }
         } catch (error) {
           const message = error && error.message ? error.message : String(error)
-          return { ok: false, text: '查群列表失败：' + message + '\n（需要 AppID/AppSecret，以及开放平台的「群管理」权限）' }
+          const local = [...new Set([...loadRememberedBridgeGroups(), ...loadCapturedBridgeGroups()])]
+          if (local.length) {
+            return {
+              ok: true,
+              text: 'QQ 接口不支持直接列群（' + message + '），改用本地记录到的群 openid：\n'
+                + local.join('\n')
+                + '\n\n填到「群服互通 → 转发到哪些群」即可；留空也会自动用这些群。',
+            }
+          }
+          return { ok: false, text: '查群列表失败：' + message + '\n（需要 AppID/AppSecret，以及开放平台的「群管理」权限；也可以让群友在群里 @ 一次机器人来捕获群 openid）' }
         }
       }
 
