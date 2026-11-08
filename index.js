@@ -204,6 +204,124 @@ const DESCRIPTION = [
   '私聊没有该标记时请让对方到群里操作。权限由脚本按 owners.json 校验，玩家传服主 ID 也会被识别行为日志记录。',
 ].join('\n')
 
+// ── /mc-ai 附件（配套 mod 1.1.0）──
+// mod 一次请求最多带 1 个附件；图片只接受这几种 mediaType，大小都按解码后的原始字节算。
+const MC_AI_MAX_ATTACHMENTS = 1
+const MC_AI_IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+const MC_AI_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+const MC_AI_FILE_MAX_BYTES = 16 * 1024 * 1024
+const MC_AI_TOTAL_MAX_BYTES = 24 * 1024 * 1024
+// 请求体上限：24MB 原始字节编码成 base64 约 32MB，再留 JSON 和字段名的余量。
+const MC_AI_MAX_BODY_BYTES = 40 * 1024 * 1024
+// 文本类小文件直接内联进消息，不依赖 agent 有没有文件工具；>100KB 或二进制仍走 file 块。
+const MC_AI_INLINE_FILE_MAX_BYTES = 100 * 1024
+const MC_AI_TEXT_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'json', 'json5', 'yml', 'yaml', 'toml', 'csv', 'tsv', 'log',
+  'java', 'kt', 'kts', 'groovy', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rb', 'go', 'rs',
+  'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'php', 'lua', 'sh', 'bash', 'zsh', 'bat', 'cmd', 'ps1',
+  'cfg', 'conf', 'config', 'properties', 'ini', 'html', 'htm', 'css', 'scss', 'xml', 'sql',
+  'diff', 'patch', 'mcmeta', 'mcfunction', 'snbt',
+])
+
+/** Node 的 base64 解码很宽容：必须重新编码和原文一致，才算规范 base64。 */
+function decodeCanonicalBase64(text) {
+  if (typeof text !== 'string' || text.length === 0) return null
+  const bytes = Buffer.from(text, 'base64')
+  return bytes.toString('base64') === text ? bytes : null
+}
+
+/** 文本内容里可打印字符的占比是否够高（二进制文件往往含大量控制字符）。 */
+function looksLikeText(text) {
+  if (text.length === 0) return false
+  let printable = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0)
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) continue
+    if (code === 0x7f) continue
+    printable++
+  }
+  return printable / text.length >= 0.95
+}
+
+/**
+ * 文件附件能否内联给模型：≤100KB、UTF-8 严格可解码，且（常见文本扩展名 或 可打印比例高）。
+ * 返回内联文本；不能内联返回 null（调用方继续走 file 块 + 路径投影）。
+ */
+function inlineFileText(name, bytes) {
+  if (bytes.byteLength > MC_AI_INLINE_FILE_MAX_BYTES) return null
+  let text = ''
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { return null }
+  const match = /\.([A-Za-z0-9]+)$/.exec(String(name || ''))
+  const ext = match ? match[1].toLowerCase() : ''
+  // 常见文本扩展名直接内联；其它（比如无扩展名）看内容是不是足够像文本。
+  if (MC_AI_TEXT_EXTENSIONS.has(ext)) return text
+  return looksLikeText(text) ? text : null
+}
+
+/**
+ * 校验 /mc-ai 请求里的 attachments。
+ * 返回 { ok: true, items: [{ kind, name, mediaType, bytes, inlineText }] } 或 { ok: false, error: '中文原因' }；
+ * 坏数据 / 未知类型 / 超限都在这里拒掉，不往上冒异常；inlineText 为 null 表示走 file 块。
+ */
+function normalizeMcAiAttachments(raw) {
+  if (raw === undefined || raw === null) return { ok: true, items: [] }
+  if (!Array.isArray(raw)) return { ok: false, error: 'attachments 必须是数组' }
+  if (raw.length > MC_AI_MAX_ATTACHMENTS) {
+    return { ok: false, error: '当前版本一次最多带 ' + MC_AI_MAX_ATTACHMENTS + ' 个附件' }
+  }
+  const items = []
+  let totalBytes = 0
+  for (let i = 0; i < raw.length; i++) {
+    const att = raw[i]
+    const at = '第 ' + (i + 1) + ' 个附件'
+    if (!att || typeof att !== 'object') return { ok: false, error: at + '格式不对' }
+    const kind = String(att.kind || '')
+    if (kind !== 'image' && kind !== 'file') return { ok: false, error: at + '的 kind 只能是 image 或 file' }
+    const isImage = kind === 'image'
+    const name = String(att.name || (isImage ? 'image.png' : 'file')).slice(0, 255)
+    const mediaType = String(att.mediaType || (isImage ? 'image/png' : 'application/octet-stream')).toLowerCase()
+    if (isImage && !MC_AI_IMAGE_MEDIA_TYPES.includes(mediaType)) {
+      return { ok: false, error: at + '的图片类型不支持：' + mediaType + '（只接受 png / jpeg / webp / gif）' }
+    }
+    if (typeof att.data !== 'string' || att.data.length === 0) return { ok: false, error: at + '缺少 data（base64）' }
+    const maxBytes = isImage ? MC_AI_IMAGE_MAX_BYTES : MC_AI_FILE_MAX_BYTES
+    // 先按 base64 字符串长度粗判，避免超限数据白白解码、占一大块内存。
+    if (att.data.length > Math.ceil(maxBytes / 3) * 4 + 8) {
+      return { ok: false, error: at + '超过大小上限（' + (maxBytes / 1024 / 1024) + 'MB）' }
+    }
+    const bytes = decodeCanonicalBase64(att.data)
+    if (!bytes) return { ok: false, error: at + '的 data 不是规范 base64' }
+    if (bytes.byteLength > maxBytes) {
+      return { ok: false, error: at + '超过大小上限（' + (maxBytes / 1024 / 1024) + 'MB）' }
+    }
+    totalBytes += bytes.byteLength
+    if (totalBytes > MC_AI_TOTAL_MAX_BYTES) {
+      return { ok: false, error: '附件总大小超过 ' + (MC_AI_TOTAL_MAX_BYTES / 1024 / 1024) + 'MB 上限' }
+    }
+    items.push({ kind, name, mediaType, bytes, inlineText: kind === 'file' ? inlineFileText(name, bytes) : null })
+  }
+  return { ok: true, items }
+}
+
+/** 附件概要，写进 mc-ai.log，例如 [att 1 image/png 230KB]、[att 1 file/application/octet-stream 1KB inline]。 */
+function describeMcAiAttachments(items) {
+  if (!items.length) return ''
+  const kinds = items.map((a) => (a.kind === 'image' ? a.mediaType : 'file/' + a.mediaType))
+  const total = items.reduce((sum, a) => sum + a.bytes.byteLength, 0)
+  const inline = items.some((a) => a.kind === 'file' && a.inlineText !== null) ? ' inline' : ''
+  return '[att ' + items.length + ' ' + kinds.join('+') + ' ' + Math.max(1, Math.round(total / 1024)) + 'KB' + inline + ']'
+}
+
+/** 把校验过的附件存进 DSH 的 attachments 存储，返回要追加到 user message 的 content 块。 */
+async function storeMcAiAttachment(store, item) {
+  if (item.kind === 'image') {
+    const refs = await store.saveImages([{ data: item.bytes, mediaType: item.mediaType, name: item.name }])
+    return { type: 'image', attachment: refs[0] }
+  }
+  const ref = await store.saveFile({ data: item.bytes, name: item.name })
+  return { type: 'file', attachment: ref }
+}
+
 export const name = 'mc-server-ops'
 export const inject = ['tools']
 // 诊断/测试用：判断某个路径是否落在受保护区域，以及临时改一份受保护清单
@@ -637,6 +755,8 @@ export function apply(ctx, config) {
   // ── 游戏内 AI 对话：给 Forge mod 的本地 HTTP 入口 ──
   // 玩家在游戏里 /ai 内容 → mod POST 到 127.0.0.1:<port>/mc-ai → 这里开一个 agent 回合
   // → 拿回复回给 mod。会话 id 形如 mc-ai:<uuid>，不是本机会话，所以走「群友」权限。
+  // mod 1.1.0 起请求还能带 1 个附件：图片存进 DSH 的 attachments 存储后随消息给模型看；
+  // 小文本文件直接内联进消息文本，大文件/二进制才落盘，由 DSH 投影成只读路径给 agent 读。
   const aiCfg = Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60 }, (liveConfig && liveConfig.ai) || {})
   if (aiCfg.enabled) {
     const aiSessions = new Map()
@@ -645,7 +765,7 @@ export function apply(ctx, config) {
       try { appendFileSync(join(opsDir, 'data', 'mc-ai.log'), new Date().toISOString() + ' ' + m + '\n') } catch { }
     }
 
-    const askAgent = async (key, text) => {
+    const askAgent = async (key, text, attachmentItems = []) => {
       const agents = ctx.get('agents')
       if (!agents || typeof agents.create !== 'function') throw new Error('DSH 没有可用的 agents 服务')
       let agent = aiSessions.get(key)
@@ -679,20 +799,47 @@ export function apply(ctx, config) {
           }
         }
       }
+      // 附件组装：图片块给模型直接看；小文本文件直接内联成 text 块（不依赖 agent 的文件工具）；
+      // 超过 100KB 或二进制的文件才落进 DSH 的 attachments 存储，靠 file 块的只读路径投影给 agent 读。
+      const content = [{ type: 'text', text }]
+      if (attachmentItems.length) {
+        let store = null
+        for (const item of attachmentItems) {
+          if (item.kind === 'file' && item.inlineText !== null) {
+            content.push({
+              type: 'text',
+              text: '--- 附件：' + item.name + '（' + item.bytes.byteLength + ' 字节，已内联）---\n'
+                + item.inlineText + '\n--- 附件结束 ---',
+            })
+            continue
+          }
+          if (!store) {
+            store = ctx.get('attachments')
+            if (!store || typeof store.saveImages !== 'function' || typeof store.saveFile !== 'function') {
+              throw new Error('DSH 没有可用的 attachments 服务')
+            }
+          }
+          try {
+            content.push(await storeMcAiAttachment(store, item))
+          } catch (error) {
+            throw new Error('附件保存失败：' + (error && error.message ? error.message : String(error)))
+          }
+        }
+      }
       const timeoutMs = Math.max(5, Number(aiCfg.timeoutSeconds) || 60) * 1000
       // 优先用 DSH 自己的构造函数，拿不到就手搓一个同形状的消息
       let message = null
       try {
         const llm = await import('@deepseek-ai/dsh-llm')
         if (llm && typeof llm.createUserMessage === 'function') {
-          message = llm.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+          message = llm.createUserMessage({ content, source: { kind: 'user' } })
         }
       } catch { /* 拿不到就退回手搓 */ }
       if (!message) {
         message = {
           id: 'mcai-' + randomUUID(),
           role: 'user',
-          content: [{ type: 'text', text }],
+          content,
           source: { kind: 'user' },
           time: Date.now(),
         }
@@ -761,25 +908,47 @@ export function apply(ctx, config) {
         return send(404, { ok: false, error: 'not found' })
       }
       const chunks = []
-      req.on('data', (c) => chunks.push(Buffer.from(c)))
+      let bodyBytes = 0
+      let bodyTooBig = false
+      req.on('data', (c) => {
+        if (bodyTooBig) return
+        bodyBytes += c.length
+        if (bodyBytes > MC_AI_MAX_BODY_BYTES) {
+          // 超限的请求体直接丢弃，按合约回 JSON（200 + ok:false），连接不炸。
+          bodyTooBig = true
+          chunks.length = 0
+          return
+        }
+        chunks.push(Buffer.from(c))
+      })
       req.on('end', () => {
+        if (bodyTooBig) return send(200, { ok: false, error: '请求体太大（附件总大小上限 ' + (MC_AI_TOTAL_MAX_BYTES / 1024 / 1024) + 'MB）' })
         let body = null
         try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch { body = null }
         if (!body) return send(400, { ok: false, error: '请求体不是合法 JSON' })
         const player = String(body.player || '').slice(0, 32)
         const uuid = String(body.uuid || player).slice(0, 64)
         const text = String(body.text || '').trim().slice(0, 1000)
-        if (!text) return send(400, { ok: false, error: '内容不能为空' })
+        // 附件先整体校验：坏 base64 / 未知媒体类型 / 超限都在开 agent 回合之前拒掉，
+        // 不让异常冒到服务外面。校验通过后再在队列里落盘、组消息。
+        const attachmentResult = normalizeMcAiAttachments(body.attachments)
+        if (!attachmentResult.ok) {
+          aiLog('[ai] ' + (player || '?') + ' 附件被拒：' + attachmentResult.error)
+          return send(200, { ok: false, error: attachmentResult.error })
+        }
+        const attachmentItems = attachmentResult.items
+        if (!text && !attachmentItems.length) return send(400, { ok: false, error: '内容不能为空' })
+        const attSummary = describeMcAiAttachments(attachmentItems)
         const key = 'mc-ai:' + (uuid || player)
         const startedAt = Date.now()
         enqueue(key, async () => {
           try {
-            const reply = await askAgent(key, text)
-            aiLog('[ai] ' + player + ' → ' + text.slice(0, 60) + ' ⇒ ' + String(reply || '').slice(0, 60))
+            const reply = await askAgent(key, text, attachmentItems)
+            aiLog('[ai] ' + player + ' → ' + text.slice(0, 60) + (attSummary ? ' ' + attSummary : '') + ' ⇒ ' + String(reply || '').slice(0, 60))
             send(200, { ok: true, reply: reply || '（小铜没说话）', elapsedMs: Date.now() - startedAt })
           } catch (error) {
             const message = error && error.message ? error.message : String(error)
-            aiLog('[ai] ' + player + ' 失败：' + message)
+            aiLog('[ai] ' + player + (attSummary ? ' ' + attSummary : '') + ' 失败：' + message)
             send(200, { ok: false, error: message })
           }
         })

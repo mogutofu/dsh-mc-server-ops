@@ -7,7 +7,7 @@
 
 **在 QQ 群里管理 Minecraft 服务器。** 服主不用开电脑、不用记命令——群里发一句话，就能查状态、启停服务器、绑白名单、投票授权；游戏聊天还能直通 QQ 群，不经过 AI、不耗 token。
 
-> 当前版本 **0.5.2** · 更新于 **2026-11-07** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
+> 当前版本 **0.6.0** · 更新于 **2026-11-08** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
 
 ## 它解决什么问题
 
@@ -36,7 +36,7 @@
 - **配方**：`kubejs` 脚本备份 / 重载
 - **授权**：动受保护区域（world、ops\data、白名单）要 2 位群友投票；**凑满 2 票之前任何人反对就作废**
 - **人设**：默认「小铜」，名字和语气都能在设置里改
-- **游戏内 AI**：装上配套 Forge mod 后，玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）
+- **游戏内 AI**：装上配套 Forge mod 后，玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件
 
 ## 安装
 
@@ -61,8 +61,8 @@ dsh plugin add /path/to/dsh-mc-server-ops
 设置面板最上面有一条更新栏，**强制开启、没有开关**：
 
 ```
-当前版本号为 0.5.1                        [检查更新]
-[新版本 v0.6.0]                           [检查更新]
+当前版本号为 0.6.0                        [检查更新]
+[新版本 v0.7.0]                           [检查更新]
 ```
 
 - 面板一打开就自动查一次，**npm 优先**（`registry.npmjs.org/<包名>/latest`），npm 不通才问 GitHub 的 `releases/latest`。
@@ -244,15 +244,29 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 ## 游戏内 AI 对话（/ai）
 
-配套 Forge mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（服务端 Forge 1.20.1-47.x）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。
+配套 Forge mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（服务端 Forge 1.20.1-47.x）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。mod **1.1.0** 起还支持附件：`/ai screenshot` 截游戏画面、`/ai file <路径>` 读玩家本机的文件。
 
 | 项 | 说明 |
 | --- | --- |
 | 监听 | 只听 `127.0.0.1`，公网进不来；端口默认 8765 |
 | 会话 | 每个玩家 UUID 一个会话 `mc-ai:<uuid>`，上下文连续；不是本机界面会话，按「群友」权限管 |
-| 协议 | `POST /mc-ai`，请求 JSON `{"player":"名字","uuid":"UUID","text":"内容"}` → 回复 `{"ok":true,"reply":"…"}`；HTTP 200 也可能是 `ok:false`，以 `ok` 字段为准 |
+| 协议 | `POST /mc-ai`，请求 JSON `{"player":"名字","uuid":"UUID","text":"内容","attachments":[…]}`（`attachments` 可省略，旧请求完全兼容）→ 回复 `{"ok":true,"reply":"…"}`；HTTP 200 也可能是 `ok:false`，以 `ok` 字段为准 |
+| 附件 | 一次最多 1 个；元素 `{kind:"image"\|"file", name, mediaType, data}`，`data` 必须是**规范 base64**（不能带空白/换行）。图片 `mediaType` 只接受 `image/png` / `image/jpeg` / `image/webp` / `image/gif`，解码后 ≤ 8MB；文件 ≤ 16MB；单次请求总大小 ≤ 24MB |
 | 配置 | `ai.enabled` / `ai.port` / `ai.timeoutSeconds`，改完立刻生效 |
-| 排障 | 回复「（小铜没说话）」通常是 agent 没拿到可用的模型路由：检查 DSH 的默认模型（`agentDefaultModel`）是否指向有效 provider；`<服务器目录>\ops\data\mc-ai.log` 会记录每次请求和真实错误 |
+| 排障 | 回复「（小铜没说话）」通常是 agent 没拿到可用的模型路由：检查 DSH 的默认模型（`agentDefaultModel`）是否指向有效 provider；`<服务器目录>\ops\data\mc-ai.log` 会记录每次请求和真实错误（带附件时还会记概要，如 `[att 1 image/png 230KB]`） |
+
+附件怎么走：
+
+- **图片**：mod 把截图/图片读成 base64 发过来 → 插件解码校验后交给 DSH 的 `attachments.saveImages()` 归一化存储 → 消息里放 `{type:"image", attachment:<ref>}`，模型直接看图。所选模型要支持图片输入（默认的 `deepseek-flash` 支持）。
+- **文件**：文本类小文件（≤100KB、UTF-8 可解码）直接把内容**内联**进消息文本块，模型当场就能看到，不依赖 agent 的文件工具；大文件或二进制才存进 DSH 的附件存储（`attachments.saveFile()`）→ 消息里放 `{type:"file", attachment:<ref>}` → DSH 发请求前把文件块投影成一段带**只读保存路径**的文本，agent 需要内容时自己用 `read` 等文件工具去读。
+- **校验失败不建回合**：坏 base64、不支持的图片类型、超过大小限制都返回 HTTP 200 + `{"ok":false,"error":"中文原因"}`，服务不崩；文本请求的行为和旧版一致。
+
+**附件安全说明：**
+
+- 入口只监听 `127.0.0.1`，外网连不上，能发请求的只有本机的 mod。
+- 附件会**真的落进 DSH home 的附件存储**（默认 `C:\Users\<用户>\.dsh\attachments\v1\`，按内容 sha256 去重），目前**不会自动删除**，时间长了要自己清理。
+- 玩家在游戏里发的截图、本机文件会经 mod 上传给 AI：模型能看到图片内容，agent 能读文件内容（文本类小文件会直接内联进消息发给模型）——让玩家知道自己发的是什么。大文件只会在附件存储里留一份只读副本，不会写回玩家给的路径。
+- 附件请求和文本请求走同一个每玩家串行队列，且 mod 侧默认每玩家 5 秒冷却，不会并发插队刷屏。
 
 游戏内玩家和群友一样受权限守卫限制：只读查询可以，写文件、执行命令需要服主授权；mod 侧默认每玩家 5 秒冷却，避免刷屏。
 
@@ -262,6 +276,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 - 服主名单在 `owners.json`，只通过本机面板或命令行修改，不经过 QQ 聊天。
 - 玩家默认只能读文件、跑只读命令；写文件、执行命令、联网下载需要服主授权（`ops.grantHours`）。
 - 发文件到群里时，`server.properties`、`ops\data\*`、密钥类文件一律拦截。
+- 游戏内 `/ai` 的附件入口只听 `127.0.0.1`，单次最多 1 个，且限制类型和大小（图片 ≤ 8MB、文件 ≤ 16MB、总 ≤ 24MB）；附件会存进 DSH home 的 attachments 存储、目前不会自动删除，文件只留只读副本，不写回玩家给的路径。
 - 设置面板的读写接口要求自定义请求头（浏览器会先发预检），跨站页面伪造不了；只改配置，不碰存档。
 - `export-data` / `import-data` 仅服主可用；导入时会拒绝含 `..` 或绝对路径的压缩包条目（防 zip slip）。
 - `cmd`（op/ban/kick 这类后台指令）在插件层就拦下非服主，不依赖脚本再判一次。
@@ -343,6 +358,9 @@ Paper / Spigot / Purpur / Folia / Leaves、Forge / NeoForge / Fabric / Quilt、A
 
 **游戏内 /ai 需要什么？**
 这个插件 + 配套的 Forge mod [dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)，服务端装 mod 后重启即可。`/ai` 会创建 agent 会话、调用 DSH 的模型，按模型计费；玩家和群友受同一套权限守卫，不能借它绕过服务器管理规则。
+
+**游戏内 /ai 能发图片和文件吗？**
+能，需要 mod 1.1.0：`/ai screenshot` 发当前游戏截图，`/ai file <路径>` 发玩家本机文件（1.1.0 一次最多 1 个附件）。图片会直接给模型看，文件落到 DSH 的附件存储后由 agent 自己读取；两条路都按上面的大小/类型限制校验，模型和 agent 因此能看到你发的内容。
 
 ## License
 

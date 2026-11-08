@@ -2,6 +2,16 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.0 — 2026-11-08
+
+- feat: 游戏内 `/ai` 支持附件——配套 Forge mod 1.1.0 可在请求里带 1 个图片或文件附件；`POST /mc-ai` 新增可选 `attachments` 数组，不带时行为和旧版完全一致
+- feat: 图片附件解码校验后交给 DSH 的 `attachments.saveImages()` 归一化存储，消息里放 `{type:"image", attachment}` 让模型直接看图
+- feat: 文件附件交给 `attachments.saveFile()` 落盘，消息里放 `{type:"file", attachment}`，由 DSH 投影成带只读保存路径的文本，agent 用文件工具读
+- feat: 文本类小文件（≤100KB、UTF-8 可解码、常见文本扩展名或可打印比例高）直接把内容内联进 user message 文本块，不再依赖 agent 的文件工具；大文件/二进制仍落盘走 file 块路径投影
+- feat: 附件校验——只接受规范 base64；图片 mediaType 仅 png/jpeg/webp/gif；图片 ≤ 8MB、文件 ≤ 16MB、总 ≤ 24MB；坏数据/超限返回 `{ok:false,error:"中文原因"}`，不崩、不建回合
+- chore: `mc-ai.log` 记录附件概要（如 `[att 1 image/png 230KB]`），请求体加 40MB 硬上限
+- docs: README 补充 `/mc-ai` attachments 协议、大小限制和安全说明（只监听 127.0.0.1；附件存进 DSH home 的 attachments 存储、目前不会自动删除；玩家本地上传的文件会发给 AI）
+
 ## 0.5.4 — 2026-11-07
 
 - feat: 游戏内 AI 对话——配套 Forge mod 的 `/ai <内容>` 走本地 `127.0.0.1:8765/mc-ai`（只监听回环；按玩家 UUID 复用 `mc-ai:<uuid>` 会话，上下文连续，不占本机界面会话）
