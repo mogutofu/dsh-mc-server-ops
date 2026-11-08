@@ -8,6 +8,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { guardCommand } from './ops/command-guard.mjs'
 import { createAdapter } from './ops/adapters/index.mjs'
 import { createBridge, writeBridgeState, QqApi } from './ops/qq-bridge.mjs'
+import { ensureQqbotInboundHook } from './ops/qqbot-hook.mjs'
 
 // 运行期路径：apply() 里按配置初始化。服务器目录、脚本位置都可以在设置里改。
 const paths = { serverDir: '', script: '', ownersFile: '', flipLog: '' }
@@ -654,6 +655,23 @@ export function apply(ctx, config) {
   paths.ownersFile = join(opsDir, 'data', 'owners.json')
   paths.flipLog = join(opsDir, 'data', 'preset-flip.log')
 
+  // ── QQ 群 openid 自动发现 ──
+  // 给 qqbot 的 inbound.js 打幂等钩子：它收到群消息时把群 openid 追加到下面的文件，
+  // bridge 发现配置里没有群时会自动采用（来源：captured）。首次装插件不需要手填 openid，
+  // 群友在群里 @ 一次机器人即可。钩子写失败不影响任何功能，退回手动配置。
+  process.env.MC_OPS_QQ_KEYS_FILE = join(opsDir, 'data', 'qq-keys.txt')
+  try {
+    mkdirSync(join(opsDir, 'data'), { recursive: true })
+    ensureQqbotInboundHook({
+      log: (m) => {
+        try {
+          appendFileSync(join(opsDir, 'data', 'bridge.log'), new Date().toISOString() + ' [bridge] ' + m + '\n')
+        } catch (error) { }
+      },
+    })
+  } catch (error) { }
+
+
   // 设置页：插件详情里渲染自己的表单（client.js），表单通过下面这两个 HTTP 路由读写配置。
   const settingsService = ctx.get('settings')
   if (settingsService && typeof settingsService.configure === 'function') {
@@ -785,7 +803,8 @@ export function apply(ctx, config) {
     if (key !== lastBridgeGroupsLog) {
       lastBridgeGroupsLog = key
       try {
-        appendFileSync(join(opsDir, 'data', 'bridge.log'), new Date().toISOString() + ' [bridge] 群目标：' + (bridgeGroupsState.groups.join(', ') || '（空）') + '（来源：' + bridgeGroupsState.source + '）\n')
+        const hint = bridgeGroupsState.source === 'none' ? '；未发现目标群：在 QQ 群里 @ 一次机器人即可自动发现，也可在设置里手填' : ''
+        appendFileSync(join(opsDir, 'data', 'bridge.log'), new Date().toISOString() + ' [bridge] 群目标：' + (bridgeGroupsState.groups.join(', ') || '（空）') + '（来源：' + bridgeGroupsState.source + '）' + hint + '\n')
       } catch (error) { }
     }
     return bridgeGroupsState

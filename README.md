@@ -240,7 +240,9 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 配置在设置面板的「群服互通」里，**改完立刻生效**（不用重启），状态行会显示「运行中 / 在线几人 / 今日已发几条 / 错误原因」。
 
-群 openid 不知道怎么办：官方没有「列出机器人加入的群」的稳定接口（`/v2/users/@me/groups` 直接 404），只能从一条真实的群消息里抓一次。详细过程写在 [docs/qq-bridge.md](https://github.com/mogutofu/dsh-mc-server-ops/blob/main/docs/qq-bridge.md)。
+群 openid 不知道怎么办：**第一次不用填**。插件加载时会自动给本机 qqbot 的 `inbound.js` 打一个幂等抓取钩子（带标记、先备份、失败不影响 qqbot），机器人收到群消息时会把群 openid 写进 `ops/data/qq-keys.txt`；群友在群里 **@ 一次机器人**，群服互通就会自动用上这个群，不需要手填。详细说明见 [docs/qq-bridge.md](https://github.com/mogutofu/dsh-mc-server-ops/blob/main/docs/qq-bridge.md)。
+
+如果 qqbot 升级把钩子冲掉了：插件下次加载会自动重打；实在不行也可以手动填 `bridge.groups`（`mc_server bridge-groups` 会给出本地记录过的群 openid）。
 
 插件会自动记住用过的群：正常转发过一次后，群 openid 会存到 `ops/data/bridge-groups.json`；`bridge.groups` 留空或因为重装插件被重置时，自动用上次记住的群，再退回最近捕获的群（`ops/data/qq-keys.txt`），所以**重装/升级插件不会再让群服互通断掉**。状态和日志里会标出来源（`config` / `remembered` / `captured`）。
 

@@ -2,6 +2,11 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.2 — 2026-11-08
+
+- feat: 群 openid 自动发现——插件加载时给 qqbot 的 `inbound.js` 打一个幂等抓取钩子（写 `ops/data/qq-keys.txt`），群友在群里 @ 一次机器人即可自动填好目标群，新装用户不用再手填 openid；qqbot 升级把钩子冲掉后，插件下次加载会自动重打（失败安全，不写坏 qqbot）
+- feat: 没有目标群时，`bridge.log` / `bridge-state.lastError` / 设置面板都会提示「在群里 @ 一次机器人即可自动发现」
+
 ## 0.6.1 — 2026-11-08
 
 - fix: 重装/升级插件后 `bridge.groups` 丢失导致群服互通沉默——群 openid 现在会持久化到 `ops/data/bridge-groups.json`；配置里 groups 为空时自动用「上次记住的群」，再退到「最近捕获的群」（`ops/data/qq-keys.txt`）

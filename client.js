@@ -415,7 +415,7 @@ window.__ModuleLoader__.load({
 							h("option", { value: "auto" }, "有玩家时开启（默认）"),
 							h("option", { value: "on" }, "常开启"),
 							h("option", { value: "off" }, "常关闭"))),
-					h(Field, { label: "转发到哪些群", hint: "群 openid，逗号分隔。不知道的话在群里 @ 小铜 问；留空 = 自动用上次记住的群，重装插件不会丢" },
+					h(Field, { label: "转发到哪些群", hint: "首次不用填：在群里 @ 一次小铜，插件会自动发现；留空 = 自动（上次记住 → 最近捕获），重装插件不会丢" },
 						h(TextInput, { value: form.bridge.groups, placeholder: "留空 = 自动（上次记住的群）", onChange: (x) => patchBridge("groups", x) })),
 					h(Field, { label: "除聊天外还转发", hint: "聊天始终转发。进服/退服默认关（会刷屏），死亡消息默认开" },
 						h("div", { style: { display: "flex", gap: 18, flexWrap: "wrap" } },

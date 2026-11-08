@@ -339,7 +339,7 @@ export function createBridge(deps) {
     const batch = queue
     queue = []
     if (!shouldForward(c)) { stats.suppressed += batch.length; return }
-    if (!c.groups.length) { stats.dropped += batch.length; lastError = '还没配置要转发到哪个群'; return }
+    if (!c.groups.length) { stats.dropped += batch.length; lastError = '还没发现目标群：在 QQ 群里 @ 一次机器人即可自动发现（或设置里手填群 openid）'; return }
     const text = formatBatch(batch, { gamePrefix: c.gamePrefix, stripUrls: c.stripUrls })
     if (!text) return
     rollDay()
