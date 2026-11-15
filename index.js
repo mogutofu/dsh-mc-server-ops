@@ -1168,10 +1168,22 @@ export function apply(ctx, config) {
     timeoutMs: 180000,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      const action = String((args && args.action) || '')
+      let action = String((args && args.action) || '')
       if (!ACTIONS.includes(action)) throw new Error('mc_server: 不支持的 action: ' + action)
       const actor = String((args && args.actor) || '').trim()
       if (!actor) throw new Error('mc_server: actor 不能为空（必须取自 [昵称 (ID)] 标记）')
+      // 兼容旧习惯：模型可能用 cmd 发「weather rain」。只要整个参数就是天气命令，
+      // 就转成 weather 动作处理（玩家也能走，不再被 cmd 的服主限制拦住）。
+      // 注意：args 对象是只读的（工具层冻结），不要原地改 args.arg，用局部变量覆盖。
+      let weatherArgOverride = null
+      if (action === 'cmd') {
+        const cmdArg = String((args && args.arg) || '').trim()
+        const weatherMatch = /^weather\s+(clear|rain|thunder|sunny|晴天|下雨|雷雨)\s*$/i.exec(cmdArg)
+        if (weatherMatch) {
+          weatherArgOverride = weatherMatch[1]
+          action = 'weather'
+        }
+      }
       const agentIdForGate = exec && exec.agent && exec.agent.id ? String(exec.agent.id) : ''
       if ((action === 'owner-add' || action === 'owner-del') && !isLocalSession(agentIdForGate)) {
         return { ok: false, text: '增删服主只能在设置面板里做，或者到服务器本机执行。' }
@@ -1187,7 +1199,7 @@ export function apply(ctx, config) {
       // Channel 由会话决定，不信模型自己填：本机会话=console，QQ 会话=group，只有私聊且模型声明 c2c 才算 c2c
       const channel = isLocalSession(agentIdForGate) ? 'console' : (String((args && args.channel) || '') === 'c2c' ? 'c2c' : 'group')
       const cli = ['-Action', action, '-Actor', actor, '-Channel', channel]
-      const arg = args && args.arg !== undefined && args.arg !== null ? String(args.arg) : ''
+      const arg = weatherArgOverride !== null ? weatherArgOverride : (args && args.arg !== undefined && args.arg !== null ? String(args.arg) : '')
       if (arg !== '') cli.push('-Arg', arg)
       // ── 出网前的三道闸 ──
       // ① 权限校验：上面已经拦掉服主专属动作和设置里关掉的功能
@@ -1249,21 +1261,21 @@ export function apply(ctx, config) {
           return { ok: true, text: '天气已改成「' + typeName + '」（服主直接执行，不投票）。' }
         }
         const mine = readPlayerBindings().filter((b) => b.qq === actor).map((b) => b.name)
-        if (!mine.length) {
-          return {
-            ok: false,
-            text: '你还没绑定游戏名，我没法用你的身份改天气。先发「绑定游戏名 你的ID」把 QQ 和游戏名绑上、进服后再试；'
-              + '也可以直接在游戏里输入 /weather ' + type + '（在线 3 人以上会自动发起投票）。',
-          }
-        }
         const playersResult = await runMcAdmin(['-Action', 'players', '-Actor', actor, '-Channel', channel], 30000)
         const online = parseOnlinePlayers(playersResult.ok ? playersResult.text : '')
         const onlineName = mine.find((name) => online.some((p) => p.toLowerCase() === name.toLowerCase()))
+        // 没有绑定或不在线时：在线人少（≤ 免投票阈值）不需要身份也能直接生效。
         if (!onlineName) {
+          const who = !mine.length ? '你还没绑定游戏名' : '你绑定的游戏名（' + mine.join(', ') + '）现在都不在线'
+          if (online.length <= threshold) {
+            const direct = await runMcAdmin(['-Action', 'cmd', '-Arg', 'weather ' + type, '-Actor', 'LOCAL-CONSOLE', '-Channel', 'console'], 60000)
+            if (!direct.ok) return { ok: false, text: '改天气失败：' + direct.text }
+            return { ok: true, text: who + '；不过当前在线 ' + online.length + ' 人（≤' + threshold + '，不用投票），已直接改成「' + typeName + '」。' }
+          }
           return {
             ok: false,
-            text: '你绑定的游戏名（' + mine.join(', ') + '）现在都不在线。先进服再让我改；'
-              + '或者在游戏里输入 /weather ' + type + '（在线 3 人以上会自动发起投票）。',
+            text: who + '，而当前在线 ' + online.length + ' 人（超过 ' + threshold + '），改天气需要游戏内投票。'
+              + '先发「绑定游戏名 你的ID」并进服，或者直接在游戏里输入 /weather ' + type + ' 发起。',
           }
         }
         const started = await runMcAdmin(['-Action', 'cmd', '-Arg', 'execute as ' + onlineName + ' run weather ' + type, '-Actor', 'LOCAL-CONSOLE', '-Channel', 'console'], 60000)
@@ -1412,18 +1424,21 @@ export function apply(ctx, config) {
   if (typeof ctx.on === 'function') {
     ctx.effect(() => ctx.on('system-prompt/assemble', async (assembly, context, next) => {
       const assembled = await next()
-      if (persona.enabled === false) return assembled
-      const scope = String(persona.scope || 'qq')
-      if (scope === 'none') return assembled
       const agentId = context && context.agent ? String(context.agent.id ?? '') : ''
       if (!agentId) return assembled
-      if (scope === 'qq' && isLocalSession(agentId)) return assembled
-      const text = renderPersona(persona)
-      if (!text) return assembled
-      return {
-        ...assembled,
-        sections: [...(assembled.sections ?? []), { name: 'mc-ops:persona', order: 91, text }],
+      const sections = [...(assembled.sections ?? [])]
+      // QQ 会话一律带上能力清单：明确告诉模型天气对所有玩家开放，别再按旧记忆拒绝
+      if (!isLocalSession(agentId)) {
+        sections.push({ name: 'mc-ops:abilities', order: 90, text: renderAbilities() })
       }
+      if (persona.enabled !== false) {
+        const scope = String(persona.scope || 'qq')
+        if (scope !== 'none' && !(scope === 'qq' && isLocalSession(agentId))) {
+          const text = renderPersona(persona)
+          if (text) sections.push({ name: 'mc-ops:persona', order: 91, text })
+        }
+      }
+      return { ...assembled, sections }
     }))
   }
 }
@@ -1691,6 +1706,17 @@ function checkActionAllowed(action, perms) {
   if (action === 'gamemode' && !perms.gamemodeSwitch) return '切游戏模式现在只有服主能做。'
   if ((action === 'kubejs-backup' || action === 'kubejs-reload') && !perms.kubejsEdit) return 'KubeJS 相关操作已经在设置里关掉了。'
   return ''
+}
+
+/** 注入给 QQ 会话的能力清单（system prompt）。重点是天气：所有玩家都能用。 */
+function renderAbilities() {
+  return [
+    '## 服务器操作能力（mc_server 工具，参数 action + actor）',
+    '- 改天气：action=weather，arg 为 clear / rain / thunder（也可写 晴天 / 下雨 / 雷雨）。',
+    '  **所有玩家都能用，不要回复「只有服主能做」**。玩家需要先用 bind-player 绑定游戏名并且当前在游戏里；',
+    '  服主/控制台直接执行。在线 ≤2 人直接生效，≥3 人时游戏内会广播投票（其他玩家输入 /vote yes）。',
+    '- 其它常用 action：status、players、logs、say、gamemode、my-players、bind-player、vote-start / vote-approve / vote-status。',
+  ].join('\n')
 }
 
 function renderPersona(persona) {

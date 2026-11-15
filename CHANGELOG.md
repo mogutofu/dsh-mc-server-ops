@@ -2,6 +2,13 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.5 — 2026-11-15
+
+- fix: 小铜在 QQ 群里仍按旧记忆拒绝改天气——给所有 QQ 会话的 system prompt 注入「服务器操作能力」清单，明确**所有玩家都能用 weather 动作、不要回复只有服主能做**
+- fix: 模型如果还是用旧习惯发 `cmd weather rain`，插件会把这条参数直接转成 weather 动作处理（玩家不再被 cmd 的服主限制拦住）
+- fix: 工具参数对象是只读的，转天气时不再原地改写 `args.arg`（修掉 `Cannot assign to read only property 'arg'` 崩溃）
+- docs: 旧会话历史里全是「只有服主能做」，如仍不生效可在群里发 `/new` 开新会话再试
+
 ## 0.6.4 — 2026-11-15
 
 - feat: `mc_server` 新增 `weather` 动作——QQ 群里玩家也能让小铜改天气（用自己**绑定且在线**的游戏名执行 `execute as <游戏名> run weather <类型>`，走 mod 的在线人数/投票规则）；服主直接执行
