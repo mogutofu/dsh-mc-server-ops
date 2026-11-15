@@ -2,6 +2,12 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.3 — 2026-11-15
+
+- feat: 游戏内天气投票——配套 mcai mod 1.2.0：玩家用 `/weather clear|rain|thunder [秒]` 改天气；在线 ≤ `directThreshold`（默认 2）直接生效，3 人及以上发起投票（`/vote yes|no|status`），默认 2 票同意通过、1 票反对作废、60 秒超时、60 秒发起冷却
+- feat: 设置面板新增「游戏内天气投票」配置（开关 / 免投票人数 / 同意票 / 反对票 / 超时 / 冷却），保存后写到服务器 `config/mcai-weather.json`，mod 每次 `/weather` 都读这个文件，改完即时生效、不用重启
+- docs: README 补充天气投票说明与配置项
+
 ## 0.6.2 — 2026-11-08
 
 - feat: 群 openid 自动发现——插件加载时给 qqbot 的 `inbound.js` 打一个幂等抓取钩子（写 `ops/data/qq-keys.txt`），群友在群里 @ 一次机器人即可自动填好目标群，新装用户不用再手填 openid；qqbot 升级把钩子冲掉后，插件下次加载会自动重打（失败安全，不写坏 qqbot）

@@ -37,6 +37,7 @@
 - **授权**：动受保护区域（world、ops\data、白名单）要 2 位群友投票；**凑满 2 票之前任何人反对就作废**
 - **人设**：默认「小铜」，名字和语气都能在设置里改
 - **游戏内 AI**：装上配套 Forge mod 后，玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件
+- **天气投票**：配套 mod 1.2.0 起，游戏内玩家可用 `/weather` 改天气；在线 ≤2 人直接生效，3 人及以上要 `/vote yes` 投票（2 票同意通过），门槛都能在设置面板改
 
 ## 安装
 
@@ -110,6 +111,11 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `ai.enabled` | `true` | 是否开游戏内 `/ai` 对话（需要配套 Forge mod；只监听 `127.0.0.1`） |
 | `ai.port` | `8765` | mod 连接的本地端口 |
 | `ai.timeoutSeconds` | `60` | 等 AI 回复的超时秒数 |
+| `weather.enabled` | `true` | 允许游戏内玩家用 `/weather` 改天气（需要 mcai mod 1.2.0+） |
+| `weather.directThreshold` | `2` | 在线 ≤ 这个数时直接改天气；更多人才发起投票 |
+| `weather.approveNeed` / `weather.rejectNeed` | `2` / `1` | 通过需要几票同意 / 几票反对作废（发起人自动算 1 票同意） |
+| `weather.timeoutSeconds` | `60` | 投票有效期（秒） |
+| `weather.cooldownSeconds` | `60` | 同一玩家两次发起的最小间隔（秒） |
 
 ## 目录结构
 
@@ -273,6 +279,17 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 - 附件请求和文本请求走同一个每玩家串行队列，且 mod 侧默认每玩家 5 秒冷却，不会并发插队刷屏。
 
 游戏内玩家和群友一样受权限守卫限制：只读查询可以，写文件、执行命令需要服主授权；mod 侧默认每玩家 5 秒冷却，避免刷屏。
+
+## 游戏内天气投票（/weather）
+
+配套 Forge mod **mcai 1.2.0+**：游戏内所有玩家都能用 `/weather clear|rain|thunder [持续秒数]` 改天气（mod 会把原版需要 OP 的 `/weather` 换成对所有人开放）。
+
+- 在线玩家 **≤ `weather.directThreshold`（默认 2）**：直接生效，全服提示「XX 把天气改成了下雨」
+- **3 人及以上**：发起投票，发起人自动算 1 票同意；其他人在游戏里用 `/vote yes` 同意、`/vote no` 反对、`/vote status` 查看
+- 同意达到 `weather.approveNeed`（默认 2）通过；反对达到 `weather.rejectNeed`（默认 1）作废；`weather.timeoutSeconds`（默认 60 秒）没结果也会作废
+- 同一玩家两次发起间隔 `weather.cooldownSeconds`（默认 60 秒）
+- 配置写在 `<服务器目录>/config/mcai-weather.json`，mod 每次 `/weather` 都读它，所以**设置面板改完即时生效**，不用重启服务器
+- 服务器装的是旧版 mod（< 1.2.0）时，这个配置不会生效，`/weather` 也还是原版需要 OP 的版本
 
 ## 安全模型
 

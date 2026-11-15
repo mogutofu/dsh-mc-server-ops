@@ -379,6 +379,21 @@ export const Config = Schema.object({
       .description('受保护路径：改动这些位置需要群友投票放行。默认 world, ops/data, whitelist'),
   }).description('投票'),
 
+  weather: Schema.object({
+    enabled: Schema.boolean().default(true)
+      .description('允许游戏内玩家用 /weather 改天气（需要 mcai mod 1.2.0+）。配置会写到服务器 config/mcai-weather.json，改完即时生效'),
+    directThreshold: Schema.number().min(0).max(20).default(2)
+      .description('在线玩家不超过这个数时直接改天气、不投票（默认 2：0-2 人直接生效）'),
+    approveNeed: Schema.number().min(1).max(20).default(2)
+      .description('投票通过需要几人同意（发起人自动算 1 票；默认 2）'),
+    rejectNeed: Schema.number().min(1).max(20).default(1)
+      .description('几人反对就作废（默认 1 = 一票否决）'),
+    timeoutSeconds: Schema.number().min(5).max(3600).default(60)
+      .description('投票有效期（秒，默认 60）'),
+    cooldownSeconds: Schema.number().min(0).max(86400).default(60)
+      .description('同一玩家两次发起的最小间隔（秒，默认 60，0 = 不限）'),
+  }).description('游戏内天气投票（配套 mcai mod）'),
+
   adapter: Schema.union(['local', 'panel']).default('local')
     .description('写操作走哪条路：local=本机直接跑脚本（默认）；panel=通过 Pterodactyl 面板的 HTTP API 启停/发指令'),
   panel: Schema.object({
@@ -715,13 +730,20 @@ export function apply(ctx, config) {
       maxPerDay: 900,
     }, (config && config.bridge) || {}),
     ai: Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60 }, (config && config.ai) || {}),
+    weather: Object.assign({
+      enabled: true, directThreshold: 2, approveNeed: 2, rejectNeed: 1,
+      timeoutSeconds: 60, cooldownSeconds: 60,
+    }, (config && config.weather) || {}),
   }
+  // 启动时先把天气投票配置写到服务器 config/mcai-weather.json；mod 每次 /weather 都读这个文件。
+  writeWeatherConfig(serverDir, liveConfig.weather)
   const memoryConfig = {
     get: () => liveConfig,
     set: (next) => {
       liveConfig = Object.assign({}, liveConfig, next && typeof next === 'object' ? next : {})
       writeVoteConfig(opsDir, liveConfig.vote)
       setProtectedPaths(liveConfig.vote && liveConfig.vote.protectedPaths)
+      writeWeatherConfig(paths.serverDir, liveConfig.weather)
     },
   }
   // 启动时先落一份，保证脚本读到的是当前设置
@@ -836,6 +858,7 @@ export function apply(ctx, config) {
       void bridge.start()
       const tick = setInterval(() => {
         resolveBridgeGroups((liveConfig && liveConfig.bridge) || {})
+        writeWeatherConfig(serverDir, liveConfig.weather)
         writeBridgeState(serverDir, Object.assign(
           { appId: appId ? appId.slice(0, 3) + '***' : '', hasSecret: !!appSecret },
           bridge.status(),
@@ -1473,6 +1496,7 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (desc) {
       await settings.update(desc.ns, body, desc.revision)
       fallbackConfig.set(body)
+      writeWeatherConfig(paths.serverDir, (body && body.weather) || (fallbackConfig.get() || {}).weather)
       return send(200, { ok: true, via: 'settings' })
     }
     if (editor && typeof editor.entries === 'function' && typeof editor.edit === 'function') {
@@ -1485,6 +1509,7 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
       if (entry) {
         await editor.edit(entry, (current) => Object.assign({}, current || {}, body))
         fallbackConfig.set(body)
+        writeWeatherConfig(paths.serverDir, (body && body.weather) || (fallbackConfig.get() || {}).weather)
         return send(200, { ok: true, via: 'configEditor' })
       }
     }
@@ -1532,6 +1557,39 @@ function readBridgeState() {
 }
 
 
+
+/** 把天气投票配置写到服务器 config/mcai-weather.json；mod 每次 /weather 时读取，改完即时生效。 */
+let lastWeatherConfigCore = ''
+function writeWeatherConfig(serverDir, weatherCfg) {
+  try {
+    const src = weatherCfg || {}
+    const clampInt = (value, fallback, min, max) => {
+      const n = Number(value)
+      const v = Number.isFinite(n) ? Math.round(n) : fallback
+      return Math.max(min, Math.min(max, v))
+    }
+    const core = {
+      enabled: src.enabled !== false,
+      directThreshold: clampInt(src.directThreshold, 2, 0, 20),
+      approveNeed: clampInt(src.approveNeed, 2, 1, 20),
+      rejectNeed: clampInt(src.rejectNeed, 1, 1, 20),
+      timeoutSeconds: clampInt(src.timeoutSeconds, 60, 5, 3600),
+      cooldownSeconds: clampInt(src.cooldownSeconds, 60, 0, 86400),
+    }
+    const coreText = JSON.stringify(core)
+    if (coreText === lastWeatherConfigCore) return core
+    const dir = join(serverDir, 'config')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'mcai-weather.json'), JSON.stringify(Object.assign({}, core, {
+      updatedAt: new Date().toISOString(),
+      managedBy: 'dsh-mc-server-ops',
+    }), null, 2) + '\n', 'utf8')
+    lastWeatherConfigCore = coreText
+    return core
+  } catch (error) {
+    return null
+  }
+}
 
 /** 把投票门槛写到 ops\data\vote-config.json，脚本每次调用时读它。 */
 function writeVoteConfig(opsPath, voteCfg, fallback) {

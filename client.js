@@ -182,6 +182,14 @@ window.__ModuleLoader__.load({
 								? (v.vote || {}).protectedPaths.join(", ")
 								: "world, ops/data, whitelist",
 						},
+						weather: {
+							enabled: (v.weather || {}).enabled !== false,
+							directThreshold: (v.weather || {}).directThreshold ?? 2,
+							approveNeed: (v.weather || {}).approveNeed ?? 2,
+							rejectNeed: (v.weather || {}).rejectNeed ?? 1,
+							timeoutSeconds: (v.weather || {}).timeoutSeconds ?? 60,
+							cooldownSeconds: (v.weather || {}).cooldownSeconds ?? 60,
+						},
 						permissions: {
 							voteEscalation: (v.permissions || {}).voteEscalation !== false,
 							kubejsEdit: (v.permissions || {}).kubejsEdit !== false,
@@ -224,6 +232,9 @@ window.__ModuleLoader__.load({
 				setForm((prev) => (prev ? Object.assign({}, prev, {
 					bridge: Object.assign({}, prev.bridge, { coalesce: Object.assign({}, prev.bridge.coalesce, { [key]: value }) }),
 				}) : prev))
+			}
+			function patchWeather(key, value) {
+				setForm((prev) => (prev ? Object.assign({}, prev, { weather: Object.assign({}, prev.weather, { [key]: value }) }) : prev))
 			}
 
 			async function save() {
@@ -394,6 +405,23 @@ window.__ModuleLoader__.load({
 					h(Toggle, { label: "允许一票否决（凑够同意票之前有人反对就作废）", value: form.vote.vetoEnabled, onChange: (x) => patch("vote", "vetoEnabled", x) }),
 					h(Field, { label: "受保护路径", hint: "逗号分隔，改动这些位置要走投票。默认 world, ops/data, whitelist" },
 						h(TextInput, { value: form.vote.protectedPaths, placeholder: "world, ops/data, whitelist", onChange: (x) => patch("vote", "protectedPaths", x) })),
+				),
+				h("div", null,
+					h("div", { style: titleStyle }, "游戏内天气投票"),
+					h("div", { style: hintStyle }, "玩家在游戏里用 /weather 改天气，在线人少直接生效、人多时 /vote 投票。配置写到服务器 config/mcai-weather.json，改完即时生效（需要 mcai mod 1.2.0+）。"),
+				),
+				h("div", { style: groupStyle },
+					h(Toggle, { label: "允许玩家改天气（/weather）", value: form.weather.enabled, onChange: (x) => patchWeather("enabled", x) }),
+					h(Field, { label: "在线不超过几人时直接生效", hint: "默认 2：0-2 人直接改；3 人及以上发起投票" },
+						h(NumberInput, { value: form.weather.directThreshold, onChange: (x) => patchWeather("directThreshold", x) })),
+					h(Field, { label: "投票需要几人同意", hint: "默认 2；发起人自动算 1 票同意" },
+						h(NumberInput, { value: form.weather.approveNeed, onChange: (x) => patchWeather("approveNeed", x) })),
+					h(Field, { label: "几人反对就作废", hint: "默认 1 = 一票否决" },
+						h(NumberInput, { value: form.weather.rejectNeed, onChange: (x) => patchWeather("rejectNeed", x) })),
+					h(Field, { label: "投票有效期（秒）", hint: "默认 60 秒；到点没结果自动作废" },
+						h(NumberInput, { value: form.weather.timeoutSeconds, onChange: (x) => patchWeather("timeoutSeconds", x) })),
+					h(Field, { label: "发起冷却（秒）", hint: "同一玩家两次 /weather 的最小间隔，默认 60 秒，0 = 不限" },
+						h(NumberInput, { value: form.weather.cooldownSeconds, onChange: (x) => patchWeather("cooldownSeconds", x) })),
 				),
 				h("div", null,
 					h("div", { style: titleStyle }, "群服互通"),
