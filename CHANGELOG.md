@@ -2,6 +2,12 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.4 — 2026-11-15
+
+- feat: `mc_server` 新增 `weather` 动作——QQ 群里玩家也能让小铜改天气（用自己**绑定且在线**的游戏名执行 `execute as <游戏名> run weather <类型>`，走 mod 的在线人数/投票规则）；服主直接执行
+- fix: 玩家在 QQ 群请求改天气不再被「只有服主能做」拒绝（之前只能走服主专属的 `cmd`；模型也拿到了明确的 weather 动作说明）
+- docs: README 补充 QQ 侧天气用法（先 bind-player 绑定游戏名并在线）
+
 ## 0.6.3 — 2026-11-15
 
 - feat: 游戏内天气投票——配套 mcai mod 1.2.0：玩家用 `/weather clear|rain|thunder [秒]` 改天气；在线 ≤ `directThreshold`（默认 2）直接生效，3 人及以上发起投票（`/vote yes|no|status`），默认 2 票同意通过、1 票反对作废、60 秒超时、60 秒发起冷却

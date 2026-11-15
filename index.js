@@ -83,6 +83,36 @@ function isOwner(actor) {
   return readOwners().includes(actor)
 }
 
+/** 读 ops/data/bindings.json：QQ openid 与游戏名的绑定。 */
+function readPlayerBindings() {
+  try {
+    const raw = readFileSync(join(paths.serverDir, 'ops', 'data', 'bindings.json'), 'utf8').replace(/^\uFEFF/, '')
+    const doc = JSON.parse(raw)
+    return Array.isArray(doc)
+      ? doc.map((x) => ({ qq: String((x && x.qq) || ''), name: String((x && x.name) || '') })).filter((x) => x.qq && x.name)
+      : []
+  } catch {
+    return []
+  }
+}
+
+/** 从 mcadmin players 的输出里解析在线玩家名。 */
+function parseOnlinePlayers(text) {
+  const match = /online:\s*([^\n]*)/i.exec(String(text || ''))
+  if (!match) return []
+  return match[1].split(',').map((x) => x.trim()).filter(Boolean)
+}
+
+/** 天气类型规范化；不认识的返回空串。 */
+const WEATHER_NAMES = { clear: '晴天', rain: '下雨', thunder: '雷雨' }
+function normalizeWeatherType(arg) {
+  const value = String(arg || '').trim().toLowerCase()
+  if (value === 'clear' || value === 'sunny' || value === '晴天') return 'clear'
+  if (value === 'rain' || value === '下雨') return 'rain'
+  if (value === 'thunder' || value === '雷雨') return 'thunder'
+  return ''
+}
+
 function grantTools(agentId) {
   if (agentId) grants.set(String(agentId), Date.now() + GRANT_MS)
 }
@@ -116,7 +146,7 @@ function readQqbotCredentials() {
 
 const ACTIONS = [
   'status', 'players', 'say', 'cmd', 'start', 'stop', 'restart',
-  'logs', 'crashinfo', 'whoami', 'help', 'gamemode',
+  'logs', 'crashinfo', 'whoami', 'help', 'gamemode', 'weather',
   'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync',
   'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status',
   'export-data', 'import-data', 'bridge-groups',
@@ -173,9 +203,10 @@ const DESCRIPTION = [
   '- stop：停服，仅服主',
   '- restart：服务器确认关闭、或健康=无响应（假死）时任何人可用（假死会自动强杀重启）；健康=正常或启动中时仅服主',
   '- gamemode：切换游戏模式，arg 形如 spectator 玩家名。玩家只能切 survival / spectator，且目标必须是自己绑定的游戏名；creative / adventure 和切别人仅服主',
+  '- weather：改天气，arg 为 clear / rain / thunder（也可写 晴天 / 下雨 / 雷雨）。所有玩家都能用：自己的游戏名在线时，小铜会用他的游戏名发起——在线 ≤2 人直接生效，≥3 人时游戏内会广播投票（其他玩家 /vote yes）；服主则直接执行。不要因为 cmd 仅服主就拒绝玩家的天气请求',
   '- cmd：执行任意后台指令（op/deop/ban/kick/whitelist 等），仅服主',
   '',
-  '玩家还能做：用 read / glob / grep 看服务器文件、用只读的 pwsh 命令查信息、用 qqbot_send_file 把普通文件发到群里（口令/密钥类文件除外）。',
+  '玩家还能做：用 read / glob / grep 看服务器文件、用只读的 pwsh 命令查信息、用 qqbot_send_file 把普通文件发到群里（口令/密钥类文件除外）、用 weather 改天气。',
   '玩家不能：改文件、删文件、新建文件、执行危险命令、设置创造模式。',
   '- bind-player：把游戏名绑定到当前 QQ（同时加入服务器白名单），arg 为游戏名（1-16 位字母/数字/下划线），一个 QQ 最多 10 个，一个游戏名最多被 3 个 QQ 绑定',
   '- unbind-player：解绑自己的某个游戏名（若该名字已无其它 QQ 绑定，同时移出白名单），arg 为游戏名',
@@ -1119,7 +1150,7 @@ export function apply(ctx, config) {
         },
         arg: {
           type: 'string',
-          description: 'say 的内容、cmd 的指令（不带斜杠）、口令，其它操作为空',
+          description: 'say 的内容、cmd 的指令（不带斜杠）、weather 的天气类型（clear/rain/thunder）、口令，其它操作为空',
         },
         channel: {
           type: 'string',
@@ -1198,6 +1229,49 @@ export function apply(ctx, config) {
           }
           return { ok: false, text: '查群列表失败：' + message + '\n（需要 AppID/AppSecret，以及开放平台的「群管理」权限；也可以让群友在群里 @ 一次机器人来捕获群 openid）' }
         }
+      }
+
+      // 天气投票：玩家也能用（不需要服主权限）。
+      // - 服主/控制台：直接执行 weather 命令（相当于控制台发起，不投票）
+      // - 玩家：用他绑定且当前在线的游戏名执行 execute as <name> run weather <type>，
+      //   mod 会按在线人数决定直接生效还是发起游戏内投票（/vote yes）。
+      if (action === 'weather') {
+        const weatherCfg = (liveConfig && liveConfig.weather) || {}
+        if (weatherCfg.enabled === false) return { ok: false, text: '天气功能已经在设置里关掉了（设置 → 游戏内天气投票）。' }
+        const type = normalizeWeatherType(arg)
+        if (!type) return { ok: false, text: '用法：weather <clear|rain|thunder>（晴天 / 下雨 / 雷雨）' }
+        const typeName = WEATHER_NAMES[type]
+        const threshold = Math.max(0, Number(weatherCfg.directThreshold) || 0)
+        const approveNeed = Math.max(1, Number(weatherCfg.approveNeed) || 2)
+        if (isOwner(actor)) {
+          const done = await runMcAdmin(['-Action', 'cmd', '-Arg', 'weather ' + type, '-Actor', 'LOCAL-CONSOLE', '-Channel', 'console'], 60000)
+          if (!done.ok) return { ok: false, text: '改天气失败：' + done.text }
+          return { ok: true, text: '天气已改成「' + typeName + '」（服主直接执行，不投票）。' }
+        }
+        const mine = readPlayerBindings().filter((b) => b.qq === actor).map((b) => b.name)
+        if (!mine.length) {
+          return {
+            ok: false,
+            text: '你还没绑定游戏名，我没法用你的身份改天气。先发「绑定游戏名 你的ID」把 QQ 和游戏名绑上、进服后再试；'
+              + '也可以直接在游戏里输入 /weather ' + type + '（在线 3 人以上会自动发起投票）。',
+          }
+        }
+        const playersResult = await runMcAdmin(['-Action', 'players', '-Actor', actor, '-Channel', channel], 30000)
+        const online = parseOnlinePlayers(playersResult.ok ? playersResult.text : '')
+        const onlineName = mine.find((name) => online.some((p) => p.toLowerCase() === name.toLowerCase()))
+        if (!onlineName) {
+          return {
+            ok: false,
+            text: '你绑定的游戏名（' + mine.join(', ') + '）现在都不在线。先进服再让我改；'
+              + '或者在游戏里输入 /weather ' + type + '（在线 3 人以上会自动发起投票）。',
+          }
+        }
+        const started = await runMcAdmin(['-Action', 'cmd', '-Arg', 'execute as ' + onlineName + ' run weather ' + type, '-Actor', 'LOCAL-CONSOLE', '-Channel', 'console'], 60000)
+        if (!started.ok) return { ok: false, text: '发起天气请求失败：' + started.text }
+        const how = online.length <= threshold
+          ? '当前在线 ' + online.length + ' 人（≤' + threshold + '），会直接生效'
+          : '当前在线 ' + online.length + ' 人，游戏里已经发起投票，需要 ' + approveNeed + ' 票同意（其他玩家输入 /vote yes）'
+        return { ok: true, text: '已用你的游戏名 ' + onlineName + ' 发起：把天气改成「' + typeName + '」。' + how + '。' }
       }
 
       const isWindows = process.platform === 'win32'

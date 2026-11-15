@@ -290,6 +290,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 - 同一玩家两次发起间隔 `weather.cooldownSeconds`（默认 60 秒）
 - 配置写在 `<服务器目录>/config/mcai-weather.json`，mod 每次 `/weather` 都读它，所以**设置面板改完即时生效**，不用重启服务器
 - 服务器装的是旧版 mod（< 1.2.0）时，这个配置不会生效，`/weather` 也还是原版需要 OP 的版本
+- **QQ 群里也能改**：玩家先用 `bind-player` 绑定游戏名并进入游戏，然后在群里跟小铜说「把天气改成下雨」即可——小铜会用你的游戏名执行 `weather`，在线 ≤2 人直接生效、≥3 人时游戏内会广播投票（其他玩家 `/vote yes`）。服主在群里说则直接执行。
 
 ## 安全模型
 
