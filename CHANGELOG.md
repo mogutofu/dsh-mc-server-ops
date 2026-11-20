@@ -2,6 +2,11 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.7 — 2026-11-21
+
+- docs: 同步 mcai 1.4.0——配套 mod / 插件新增 **Bukkit 附件桥接**：只装 Bukkit/Spigot/Paper 插件的服务器，装了 mcai-client 1.4.0 的玩家也能 `/ai screenshot`、`/ai file`（`mcai:bridge` 只传元数据，字节走插件自带 HTTP 上传端口，`plugins/mc-ai/config.yml` 配置）
+- docs: 说明 `/mc-ai` 契约在 1.4.0 未变，本插件不需要升级；附件仍是 base64 附件数组，DSH 侧处理逻辑不变
+
 ## 0.6.6 — 2026-11-20
 
 - docs: 同步 mcai 1.3.0 多平台发布——配套 mod 现在覆盖 Forge 1.12.2/1.20.1、NeoForge 1.21.1/26.x、Fabric 26.x，以及 Bukkit/Spigot/Paper 通用插件；/mc-ai 契约与 1.2.0 完全一致，插件无需改代码

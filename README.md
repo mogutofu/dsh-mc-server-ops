@@ -36,7 +36,7 @@
 - **配方**：`kubejs` 脚本备份 / 重载
 - **授权**：动受保护区域（world、ops\data、白名单）要 2 位群友投票；**凑满 2 票之前任何人反对就作废**
 - **人设**：默认「小铜」，名字和语气都能在设置里改
-- **游戏内 AI**：装上配套 mc-ai mod 后（1.3.0 起支持 Forge / NeoForge / Fabric / Bukkit），玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件
+- **游戏内 AI**：装上配套 mc-ai mod 后（1.3.0 起支持 Forge / NeoForge / Fabric / Bukkit），玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件；1.4.0 起 **Bukkit 插件也有附件桥接**——只装插件的服务器上，装了 mcai-client 1.4.0 的玩家同样能用 `/ai screenshot`、`/ai file`（字节走插件自带 HTTP 上传端口，`plugins/mc-ai/config.yml` 配置）
 - **天气投票**：配套 mc-ai mod 1.2.0 起（1.3.0 起所有平台一致），游戏内玩家可用 `/weather` 改天气；在线 ≤2 人直接生效，3 人及以上要 `/vote yes` 投票（2 票同意通过），门槛都能在设置面板改
 
 ## 安装
@@ -254,7 +254,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 ## 游戏内 AI 对话（/ai）
 
-配套 mc-ai mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（1.3.0 起支持 Forge 1.12.2/1.20.1、NeoForge 1.21.1/26.x、Fabric 26.x，以及 Bukkit/Spigot/Paper 通用插件）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。mod **1.1.0** 起还支持附件：`/ai screenshot` 截游戏画面、`/ai file <路径>` 读玩家本机的文件。
+配套 mc-ai mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（1.3.0 起支持 Forge 1.12.2/1.20.1、NeoForge 1.21.1/26.x、Fabric 26.x，以及 Bukkit/Spigot/Paper 通用插件；**1.4.0 起 Bukkit 插件也有附件桥接**，只装插件的服务器上装了 mcai-client 1.4.0 的玩家也能用 `/ai screenshot`、`/ai file`）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。mod **1.1.0** 起还支持附件：`/ai screenshot` 截游戏画面、`/ai file <路径>` 读玩家本机的文件；`/mc-ai` 契约在 1.4.0 未变，本插件无需改代码。
 
 | 项 | 说明 |
 | --- | --- |
