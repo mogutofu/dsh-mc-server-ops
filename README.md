@@ -36,8 +36,8 @@
 - **配方**：`kubejs` 脚本备份 / 重载
 - **授权**：动受保护区域（world、ops\data、白名单）要 2 位群友投票；**凑满 2 票之前任何人反对就作废**
 - **人设**：默认「小铜」，名字和语气都能在设置里改
-- **游戏内 AI**：装上配套 Forge mod 后，玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件
-- **天气投票**：配套 mod 1.2.0 起，游戏内玩家可用 `/weather` 改天气；在线 ≤2 人直接生效，3 人及以上要 `/vote yes` 投票（2 票同意通过），门槛都能在设置面板改
+- **游戏内 AI**：装上配套 mc-ai mod 后（1.3.0 起支持 Forge / NeoForge / Fabric / Bukkit），玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件
+- **天气投票**：配套 mc-ai mod 1.2.0 起（1.3.0 起所有平台一致），游戏内玩家可用 `/weather` 改天气；在线 ≤2 人直接生效，3 人及以上要 `/vote yes` 投票（2 票同意通过），门槛都能在设置面板改
 
 ## 安装
 
@@ -108,10 +108,10 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `bridge.coalesce.fastMs` | `50000` | 相邻两条发言间隔小于这个值算「话密」 |
 | `bridge.maxPerDay` | `900` | 每群每天发送上限（官方上限 1000） |
 | `bridge.appId` / `appSecret` | 空 | 留空自动从本机 qqbot 插件配置读取 |
-| `ai.enabled` | `true` | 是否开游戏内 `/ai` 对话（需要配套 Forge mod；只监听 `127.0.0.1`） |
+| `ai.enabled` | `true` | 是否开游戏内 `/ai` 对话（需要配套 mc-ai mod，支持 Forge / NeoForge / Fabric / Bukkit；只监听 `127.0.0.1`） |
 | `ai.port` | `8765` | mod 连接的本地端口 |
 | `ai.timeoutSeconds` | `60` | 等 AI 回复的超时秒数 |
-| `weather.enabled` | `true` | 允许游戏内玩家用 `/weather` 改天气（需要 mcai mod 1.2.0+） |
+| `weather.enabled` | `true` | 允许游戏内玩家用 `/weather` 改天气（需要 mc-ai mod 1.2.0+；1.3.0 起支持全部平台） |
 | `weather.directThreshold` | `2` | 在线 ≤ 这个数时直接改天气；更多人才发起投票 |
 | `weather.approveNeed` / `weather.rejectNeed` | `2` / `1` | 通过需要几票同意 / 几票反对作废（发起人自动算 1 票同意） |
 | `weather.timeoutSeconds` | `60` | 投票有效期（秒） |
@@ -254,7 +254,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 ## 游戏内 AI 对话（/ai）
 
-配套 Forge mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（服务端 Forge 1.20.1-47.x）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。mod **1.1.0** 起还支持附件：`/ai screenshot` 截游戏画面、`/ai file <路径>` 读玩家本机的文件。
+配套 mc-ai mod：[mogutofu/dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)（1.3.0 起支持 Forge 1.12.2/1.20.1、NeoForge 1.21.1/26.x、Fabric 26.x，以及 Bukkit/Spigot/Paper 通用插件）。玩家在游戏里输入 `/ai 你好`，mod 会把请求 POST 到本机 `127.0.0.1:8765/mc-ai`，插件开一个 agent 回合，再把回复贴回玩家聊天栏。mod **1.1.0** 起还支持附件：`/ai screenshot` 截游戏画面、`/ai file <路径>` 读玩家本机的文件。
 
 | 项 | 说明 |
 | --- | --- |
@@ -282,7 +282,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 ## 游戏内天气投票（/weather）
 
-配套 Forge mod **mcai 1.2.0+**：游戏内所有玩家都能用 `/weather clear|rain|thunder [持续秒数]` 改天气（mod 会把原版需要 OP 的 `/weather` 换成对所有人开放）。
+配套 mc-ai mod **1.2.0+**（1.3.0 起覆盖 Forge / NeoForge / Fabric / Bukkit）：游戏内所有玩家都能用 `/weather clear|rain|thunder [持续秒数]` 改天气（mod 会把原版需要 OP 的 `/weather` 换成对所有人开放）。
 
 - 在线玩家 **≤ `weather.directThreshold`（默认 2）**：直接生效，全服提示「XX 把天气改成了下雨」
 - **3 人及以上**：发起投票，发起人自动算 1 票同意；其他人在游戏里用 `/vote yes` 同意、`/vote no` 反对、`/vote status` 查看
@@ -379,10 +379,10 @@ Paper / Spigot / Purpur / Folia / Leaves、Forge / NeoForge / Fabric / Quilt、A
 不会。桥直接读日志、直接调 QQ 开放平台，不创建 agent 会话、不调模型。只有群友真的问问题时才走 AI。
 
 **游戏内 /ai 需要什么？**
-这个插件 + 配套的 Forge mod [dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)，服务端装 mod 后重启即可。`/ai` 会创建 agent 会话、调用 DSH 的模型，按模型计费；玩家和群友受同一套权限守卫，不能借它绕过服务器管理规则。
+这个插件 + 配套的 mc-ai mod [dsh-mc-ai-chat](https://github.com/mogutofu/dsh-mc-ai-chat)，服务端装 mod 后重启即可。`/ai` 会创建 agent 会话、调用 DSH 的模型，按模型计费；玩家和群友受同一套权限守卫，不能借它绕过服务器管理规则。
 
 **游戏内 /ai 能发图片和文件吗？**
-能，需要 mod 1.1.0：`/ai screenshot` 发当前游戏截图，`/ai file <路径>` 发玩家本机文件（1.1.0 一次最多 1 个附件）。图片会直接给模型看，文件落到 DSH 的附件存储后由 agent 自己读取；两条路都按上面的大小/类型限制校验，模型和 agent 因此能看到你发的内容。
+能，需要 mod 1.1.0：`/ai screenshot` 发当前游戏截图，`/ai file <路径>` 发玩家本机文件（1.1.0 一次最多 1 个附件）。图片会直接给模型看，文件落到 DSH 的附件存储后由 agent 自己读取；两条路都按上面的大小/类型限制校验，模型和 agent 因此能看到你发的内容。Bukkit 版插件只有文字 `/ai`，没有附件。
 
 ## License
 

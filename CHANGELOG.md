@@ -2,6 +2,11 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.6.6 — 2026-11-20
+
+- docs: 同步 mcai 1.3.0 多平台发布——配套 mod 现在覆盖 Forge 1.12.2/1.20.1、NeoForge 1.21.1/26.x、Fabric 26.x，以及 Bukkit/Spigot/Paper 通用插件；/mc-ai 契约与 1.2.0 完全一致，插件无需改代码
+- docs: 说明 Bukkit 版只有文字 /ai，截图/文件附件仅 Forge/NeoForge/Fabric 的选装客户端模组支持
+
 ## 0.6.5 — 2026-11-15
 
 - fix: 小铜在 QQ 群里仍按旧记忆拒绝改天气——给所有 QQ 会话的 system prompt 注入「服务器操作能力」清单，明确**所有玩家都能用 weather 动作、不要回复只有服主能做**
