@@ -7,7 +7,7 @@
 
 **在 QQ 群里管理 Minecraft 服务器。** 服主不用开电脑、不用记命令——群里发一句话，就能查状态、启停服务器、绑白名单、投票授权；游戏聊天还能直通 QQ 群，不经过 AI、不耗 token。
 
-> 当前版本 **0.6.0** · 更新于 **2026-11-08** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
+> 当前版本 **0.7.0** · 更新于 **2026-11-21** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
 
 ## 它解决什么问题
 
@@ -37,6 +37,7 @@
 - **授权**：动受保护区域（world、ops\data、白名单）要 2 位群友投票；**凑满 2 票之前任何人反对就作废**
 - **人设**：默认「小铜」，名字和语气都能在设置里改
 - **游戏内 AI**：装上配套 mc-ai mod 后（1.3.0 起支持 Forge / NeoForge / Fabric / Bukkit），玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件；1.4.0 起 **Bukkit 插件也有附件桥接**——只装插件的服务器上，装了 mcai-client 1.4.0 的玩家同样能用 `/ai screenshot`、`/ai file`（字节走插件自带 HTTP 上传端口，`plugins/mc-ai/config.yml` 配置）
+- **AI 市场接口**：配套 AIMCmarket 模组（Forge 1.20.1 服务端-only）可用 `POST /mc-exchange` 让 AI 做结构化解析、市场新闻、财报、招股书和政府政策建议；默认关闭、独立会话、严格 JSON、带限流，关掉时不影响任何现有功能
 - **天气投票**：配套 mc-ai mod 1.2.0 起（1.3.0 起所有平台一致），游戏内玩家可用 `/weather` 改天气；在线 ≤2 人直接生效，3 人及以上要 `/vote yes` 投票（2 票同意通过），门槛都能在设置面板改
 
 ## 安装
@@ -111,6 +112,10 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `ai.enabled` | `true` | 是否开游戏内 `/ai` 对话（需要配套 mc-ai mod，支持 Forge / NeoForge / Fabric / Bukkit；只监听 `127.0.0.1`） |
 | `ai.port` | `8765` | mod 连接的本地端口 |
 | `ai.timeoutSeconds` | `60` | 等 AI 回复的超时秒数 |
+| `exchange.enabled` | `false` | AI 市场接口（AIMCmarket）总开关；默认关闭，关着时 `/mc-exchange` 返回 404，不建会话、不花 token |
+| `exchange.timeoutSeconds` | `20` | `/mc-exchange` 单次等模型的超时（秒） |
+| `exchange.maxPerMinute` | `30` | `/mc-exchange` 全局限流（次/分钟），超了 429 |
+| `exchange.maxContextChars` | `20000` | 请求 `context` 序列化后的最大字符数，超了服务端截断 |
 | `weather.enabled` | `true` | 允许游戏内玩家用 `/weather` 改天气（需要 mc-ai mod 1.2.0+；1.3.0 起支持全部平台） |
 | `weather.directThreshold` | `2` | 在线 ≤ 这个数时直接改天气；更多人才发起投票 |
 | `weather.approveNeed` / `weather.rejectNeed` | `2` / `1` | 通过需要几票同意 / 几票反对作废（发起人自动算 1 票同意） |
@@ -121,12 +126,15 @@ dsh plugin add /path/to/dsh-mc-server-ops
 
 ```
 dsh-mc-server-ops/
-├── index.js            # 插件宿主代码：mc_server 工具、权限守卫、人设注入
+├── index.js            # 插件宿主代码：mc_server 工具、权限守卫、人设注入、/mc-ai 与 /mc-exchange
 ├── cordis.patch.yml    # 安装时自动插入的加载行
+├── test/
+│   └── mc-exchange.mjs # /mc-exchange 测试：纯函数单元校验 + 本机接口矩阵（无第三方依赖）
 └── ops/
     ├── command-guard.mjs   # 静态命令拦截：出网前掐掉“一条命令搞崩整个服”的类型
     ├── qq-bridge.mjs       # 群服互通：读日志 → 直连 QQ 开放平台（不经过 AI）
     ├── coalesce.mjs        # 合并窗口计算：最近发言节奏 + 在线人数 → 等多久再发（纯函数）
+    ├── mc-exchange.mjs     # /mc-exchange：请求校验、输入裁剪、JSON 兜底、data schema 校验（纯函数）
     ├── rcon.mjs            # 跨平台核心：RCON、进程探测、日志、状态汇总
     ├── rcon-probe.mjs      # 极简 RCON 探测（查在线玩家）
     ├── adapters/           # 写操作适配器：local（本机脚本）/ panel（Pterodactyl）
@@ -280,6 +288,66 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 游戏内玩家和群友一样受权限守卫限制：只读查询可以，写文件、执行命令需要服主授权；mod 侧默认每玩家 5 秒冷却，避免刷屏。
 
+## AI 市场接口（AIMCmarket，默认关闭）
+
+这是给 [AIMCmarket](https://github.com/mogutofu/dsh-aimcmarket)（Forge 1.20.1 服务端-only 模组）用的结构化接口。模组把「市场先生」和「AI 政府」里需要 AI 的部分（自然语言→订单参数、市场新闻、财报、招股书、政策建议）发过来，DSH 用独立会话和独立 system prompt 只回一个 JSON 对象；扣钱、发货、政策落地这些还是模组自己算。
+
+默认关闭。关着的时候 `/mc-exchange` 直接 404，不建会话、不花 token，`/mc-ai`、群服互通、天气这些都不受影响。
+
+打开方式：设置 → MC 服务器 → 「AI 市场接口（AIMCmarket）」，勾上「开启 /mc-exchange」；或者把配置里的 `exchange.enabled` 改成 `true`。保存后立刻生效，不用重启 DSH。它和小铜的 `/ai` 共用同一个本地 HTTP 服务（`127.0.0.1:<ai.port>`，默认 8765），所以 `ai.enabled=false` 时整个端口都不监听，exchange 也用不了。
+
+### 接口长什么样
+
+`POST /mc-exchange`，`Content-Type: application/json`：
+
+```json
+{"task":"parse","player":"AIMCmarket","uuid":"00000000-0000-0000-0000-00000000a1c0","message":"买 3 个铁镐","context":{"balanceCents":50000}}
+```
+
+六个 task：`ping`、`parse`、`news`、`report`、`prospectus`、`government`。`ping` 是静态的，用来确认版本和任务列表：
+
+```bash
+curl -s http://127.0.0.1:8765/mc-exchange -H 'content-type: application/json' -d '{"task":"ping"}'
+# {"ok":true,"data":{"version":"0.7.0","tasks":["parse","news","report","prospectus","government"]},"elapsedMs":1}
+```
+
+其余五个会走 agent，data 形状如下（字段细节和枚举见模组仓库的 `docs/AI-PROTOCOL.md`，服务端也按同一份 schema 校验）：
+
+| task | 请求里带什么 | data |
+| --- | --- | --- |
+| `parse` | `message`=玩家原话，`context` 带余额/物品候选/股票/基金 | `{"intent":"buy","items":[{"id":"minecraft:iron_pickaxe","count":3}],"symbol":"","shares":0,"amountCents":0,"reply":"…"}` |
+| `news` | `context` 带最近行情和新闻 | `{"headline":"…","body":"…","effects":[{"target":"minecraft:iron_ingot","multiplier":1.08,"ticks":6}]}` |
+| `report` | `context` 带公司财务状况 | `{"revenueCents":1200000,"profitCents":300000,"outlook":"up","headline":"…"}` |
+| `prospectus` | `context` 带公司/IPO 数据 | `{"title":"…","summary":"…","risk":"…","useOfFunds":"…"}` |
+| `government` | `context` 带宏观指标、利率、税、冷却 | `{"action":"none\|rate_cut\|rate_hike\|welfare\|stimulus\|austerity\|subsidy\|tariff\|liquidity\|min_wage","params":{…},"reason":"…","announcement":"…"}` |
+
+成功回 `200 {"ok":true,"data":{…},"elapsedMs":123}`。模型输出不一定是干净 JSON，所以服务端会先剥离 ```json 包裹、取第一个括号配平的对象、`JSON.parse`、再按 task 做 schema 校验；校验不过就把错误摘要发回模型重试一次（要求只输出 JSON），还不行就回 `200 {"ok":false,"error":"…","raw":"…"}`，由模组自己降级到 `/mc-ai` 或本地规则。
+
+状态码：功能关闭 `404 {"ok":false,"error":"exchange disabled"}`；参数不合法 `400 {"ok":false,"error":"…"}`；限流 `429 {"ok":false,"error":"rate limited"}`；模型报错/超时/JSON 修复失败都是 `200` + `ok:false`（HTTP 层不炸）。
+
+### 服务端做了什么
+
+- **独立会话**：每个 task 一个 `mc-exchange:<task>` 会话，system prompt 里只有「只输出 JSON + 这个 task 的 schema」，不会混进小铜的玩家会话，市场上下文也不会带进 `/mc-ai`。这些会话不给工具权限，模型只能回 JSON。
+- **裁剪输入**：`message` 超过 200 字截断；`context` 序列化后超过 `exchange.maxContextChars`（默认 20000）会先收缩数组/截断字符串，再不行换成带 preview 的截断 JSON，不会因为 context 太大把请求搞崩。
+- **校验独立于模型**：task / intent / action 枚举、物品 id 形如 `minecraft:xxx`、数量 1–576、金额非负整数、政策参数边界（`bp` 25/50/75/100、`ratio` 范围、`days` 1–30、`amountCents`、`sectors` 数组、`target` 字符串）都在服务端重算一遍，不合规直接 `ok:false`。AI 只给参数和文案。
+- **限流**：全局 `exchange.maxPerMinute`（默认 30），滑动 60 秒窗口，超了 429。
+- **日志**：`<服务器目录>\ops\data\mc-exchange.log`，一行一单记 task、耗时、有没有做过 JSON 提取、成功还是失败，不记玩家原话和完整模型输出。
+
+| 配置项 | 默认 | 说明 |
+| --- | --- | --- |
+| `exchange.enabled` | `false` | 总开关；关着时路由 404，不建会话、不花 token |
+| `exchange.timeoutSeconds` | `20` | 单次请求等模型的超时（秒） |
+| `exchange.maxPerMinute` | `30` | 全局限流（次/分钟） |
+| `exchange.maxContextChars` | `20000` | `context` 最大字符数，超了截断 |
+
+本地自测：
+
+```bash
+node test/mc-exchange.mjs
+```
+
+纯函数部分不需要 DSH；HTTP 部分连不上服务会全部 SKIP 并以 0 退出。`exchange.enabled=false` 时只验证「关闭时 404」和「`/mc-ai` 仍然正常」，打开后再跑一次才会跑 ping / parse 三个样例 / news / report / prospectus / government 两次 / 400 参数校验 / 429 的完整矩阵。真实模型很难稳定吐出坏 JSON，所以「坏 JSON → ok:false」由单元校验覆盖（提取、解析、schema、重试逻辑），HTTP 那格会 SKIP 并说明原因。
+
 ## 游戏内天气投票（/weather）
 
 配套 mc-ai mod **1.2.0+**（1.3.0 起覆盖 Forge / NeoForge / Fabric / Bukkit）：游戏内所有玩家都能用 `/weather clear|rain|thunder [持续秒数]` 改天气（mod 会把原版需要 OP 的 `/weather` 换成对所有人开放）。
@@ -299,6 +367,7 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 - 玩家默认只能读文件、跑只读命令；写文件、执行命令、联网下载需要服主授权（`ops.grantHours`）。
 - 发文件到群里时，`server.properties`、`ops\data\*`、密钥类文件一律拦截。
 - 游戏内 `/ai` 的附件入口只听 `127.0.0.1`，单次最多 1 个，且限制类型和大小（图片 ≤ 8MB、文件 ≤ 16MB、总 ≤ 24MB）；附件会存进 DSH home 的 attachments 存储、目前不会自动删除，文件只留只读副本，不写回玩家给的路径。
+- `/mc-exchange` 默认关闭。打开后也只在本机回环口，独立会话 + 独立 system prompt，message 截断 200 字、context 截断 2 万字，全局限流 30 次/分钟、单次 20 秒超时；AI 只返回参数和文案，真正扣钱、发货、政策落地要在模组侧再校验一次。
 - 设置面板的读写接口要求自定义请求头（浏览器会先发预检），跨站页面伪造不了；只改配置，不碰存档。
 - `export-data` / `import-data` 仅服主可用；导入时会拒绝含 `..` 或绝对路径的压缩包条目（防 zip slip）。
 - `cmd`（op/ban/kick 这类后台指令）在插件层就拦下非服主，不依赖脚本再判一次。
@@ -383,6 +452,9 @@ Paper / Spigot / Purpur / Folia / Leaves、Forge / NeoForge / Fabric / Quilt、A
 
 **游戏内 /ai 能发图片和文件吗？**
 能，需要 mod 1.1.0：`/ai screenshot` 发当前游戏截图，`/ai file <路径>` 发玩家本机文件（1.1.0 一次最多 1 个附件）。图片会直接给模型看，文件落到 DSH 的附件存储后由 agent 自己读取；两条路都按上面的大小/类型限制校验，模型和 agent 因此能看到你发的内容。Bukkit 版插件只有文字 `/ai`，没有附件。
+
+**`/mc-exchange` 是什么？**
+给 AIMCmarket 模组用的严格 JSON 接口，默认关闭。打开后 DSH 会用独立会话回答解析、新闻、财报、招股书和政策请求，只回 JSON；关着时这个路由 404，不建会话也不花 token。普通 `/ai` 和群聊不受影响。
 
 ## License
 

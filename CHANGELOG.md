@@ -2,6 +2,17 @@
 
 版本号对应 git tag `vX.Y.Z`。
 
+## 0.7.0 — 2026-11-21
+
+- feat: 新增 `POST /mc-exchange` 严格 JSON 接口（默认关闭），给配套 AIMCmarket 模组用。和 `/mc-ai` 共用同一个本地 HTTP 服务（`ai.port`，默认 8765），6 个 task：`ping` / `parse` / `news` / `report` / `prospectus` / `government`；成功 `200 {"ok":true,"data":{…},"elapsedMs":…}`，参数不合法 400，限流 429，模型或 JSON 修复失败 `200 {"ok":false,…}`
+- feat: 新增配置 `exchange.enabled`（默认 `false`）/ `exchange.timeoutSeconds`（20）/ `exchange.maxPerMinute`（30）/ `exchange.maxContextChars`（20000），加进 Config schema 和手写设置页，保存后热生效
+- feat: exchange 用独立会话 `mc-exchange:<task>` 和独立 system prompt（只输出 JSON + 该 task 的 schema），不污染小铜的玩家会话，也不把市场上下文带进 `/mc-ai`；这些会话屏蔽工具，模型只能回 JSON
+- feat: 服务端 JSON 兜底——剥离 ```json 包裹、取第一个括号配平对象、`JSON.parse` 后按 task 做 schema 校验；失败把错误摘要发回模型重试一次。`message` 截断 200 字，`context` 按 `maxContextChars` 截断；task/intent/action 枚举、物品 id 形如 `minecraft:xxx`、数量 1–576、金额非负整数、政策参数边界（bp / ratio / days / amountCents / sectors / target）全部在服务端校验，不合规直接 `ok:false`
+- feat: 全局限流（滑动 60 秒窗口）；日志写 `<服务器目录>\ops\data\mc-exchange.log`，记 task、耗时、是否做过 JSON 提取、成功/失败，不记玩家原话
+- test: 新增 `test/mc-exchange.mjs`（纯 Node、无第三方依赖）：纯函数单元校验 + 本机接口矩阵；服务没起或 exchange 关闭时自动 SKIP 并输出 PASS/FAIL/SKIP 汇总；`npm run check` 纳入新文件
+- docs: README 新增「AI 市场接口（AIMCmarket，默认关闭）」，配置表、目录结构、安全模型、FAQ 同步
+- 兼容性：`/mc-ai` 的请求/响应/会话/限流/日志完全不变；`exchange.enabled=false`（默认值）时 `/mc-exchange` 返回 `404 {"ok":false,"error":"exchange disabled"}`，不建会话、不消耗 token，其余行为与 0.6.7 等价（除版本号）
+
 ## 0.6.7 — 2026-11-21
 
 - docs: 同步 mcai 1.4.0——配套 mod / 插件新增 **Bukkit 附件桥接**：只装 Bukkit/Spigot/Paper 插件的服务器，装了 mcai-client 1.4.0 的玩家也能 `/ai screenshot`、`/ai file`（`mcai:bridge` 只传元数据，字节走插件自带 HTTP 上传端口，`plugins/mc-ai/config.yml` 配置）

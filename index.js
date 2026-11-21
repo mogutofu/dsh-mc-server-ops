@@ -9,6 +9,16 @@ import { guardCommand } from './ops/command-guard.mjs'
 import { createAdapter } from './ops/adapters/index.mjs'
 import { createBridge, writeBridgeState, QqApi } from './ops/qq-bridge.mjs'
 import { ensureQqbotInboundHook } from './ops/qqbot-hook.mjs'
+import {
+  EXCHANGE_AGENT_TASKS,
+  buildExchangeRetryPrompt,
+  buildExchangeUserPrompt,
+  exchangeSystemPrompt,
+  limitExchangeContext,
+  limitExchangeMessage,
+  normalizeExchangeRequest,
+  parseExchangeReply,
+} from './ops/mc-exchange.mjs'
 
 // 运行期路径：apply() 里按配置初始化。服务器目录、脚本位置都可以在设置里改。
 const paths = { serverDir: '', script: '', ownersFile: '', flipLog: '' }
@@ -354,6 +364,64 @@ async function storeMcAiAttachment(store, item) {
   return { type: 'file', attachment: ref }
 }
 
+// ── /mc-exchange（AIMCmarket 市场接口，默认关闭）──
+// 和小铜的 /mc-ai 共用同一个本地 HTTP 服务；独立会话 + 独立 system prompt，只输出 JSON。
+const MC_EXCHANGE_SESSION_PREFIX = 'mc-exchange:'
+// 请求体硬上限：context 再大也只缓冲到这里，之后按 maxContextChars 截断。
+const MC_EXCHANGE_MAX_BODY_BYTES = 1024 * 1024
+const MC_EXCHANGE_LOG_NAME = 'mc-exchange.log'
+
+/** 会话 id → exchange task；不是 exchange 会话返回空串。 */
+function exchangeSessionTask(id) {
+  const text = String(id || '')
+  if (!text.startsWith(MC_EXCHANGE_SESSION_PREFIX)) return ''
+  const task = text.slice(MC_EXCHANGE_SESSION_PREFIX.length)
+  return EXCHANGE_AGENT_TASKS.includes(task) ? task : ''
+}
+
+function shortErrorMessage(error) {
+  const message = error && error.message ? error.message : String(error)
+  return String(message || '未知错误').replace(/\s+/g, ' ').trim().slice(0, 300)
+}
+
+/** 日志里的一行错误摘要：压掉换行、限长，避免把整段模型输出写进日志。 */
+function clipLogMessage(text, max = 160) {
+  return String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function clampNumber(value, fallback, min, max) {
+  const n = Number(value)
+  const base = Number.isFinite(n) ? n : fallback
+  return Math.max(min, Math.min(max, base))
+}
+
+/** 读请求体：超过 maxBytes 就停止缓冲并标记（不把超大 body 拼进内存）。 */
+function readCappedBody(req, maxBytes) {
+  return new Promise((resolve) => {
+    const chunks = []
+    let bytes = 0
+    let tooBig = false
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+    req.on('data', (chunk) => {
+      if (tooBig) return
+      bytes += chunk.length
+      if (bytes > maxBytes) {
+        tooBig = true
+        chunks.length = 0
+        return
+      }
+      chunks.push(Buffer.from(chunk))
+    })
+    req.on('end', () => finish(tooBig ? { tooBig: true } : { text: Buffer.concat(chunks).toString('utf8') }))
+    req.on('error', () => finish({ error: '请求读取失败' }))
+  })
+}
+
 export const name = 'mc-server-ops'
 export const inject = ['tools']
 // 诊断/测试用：判断某个路径是否落在受保护区域，以及临时改一份受保护清单
@@ -468,6 +536,17 @@ export const Config = Schema.object({
     port: Schema.number().default(8765).description('mod 连接的端口，默认 8765'),
     timeoutSeconds: Schema.number().default(60).description('等待 AI 回复的超时时间（秒）'),
   }).description('游戏内 AI 对话'),
+
+  exchange: Schema.object({
+    enabled: Schema.boolean().default(false)
+      .description('AI 市场接口（AIMCmarket）。默认关闭；开启后 AIMCmarket 模组可使用 /mc-exchange 做结构化解析/新闻/财报/招股书/政府政策，其它功能不受影响。关掉时该路由返回 404，不建会话、不消耗 token'),
+    timeoutSeconds: Schema.number().min(1).max(300).default(20)
+      .description('单次 /mc-exchange 等待模型输出的超时（秒，默认 20）'),
+    maxPerMinute: Schema.number().min(1).max(600).default(30)
+      .description('全局限流：每分钟最多处理多少个 /mc-exchange 请求，超了返回 429（默认 30）'),
+    maxContextChars: Schema.number().min(100).max(200000).default(20000)
+      .description('请求 context 序列化后的最大字符数，超了截断（默认 20000）'),
+  }).description('AI 市场接口（AIMCmarket）'),
 })
 
 // ─────────────────────── 检查更新 / 自更新 ───────────────────────
@@ -761,6 +840,9 @@ export function apply(ctx, config) {
       maxPerDay: 900,
     }, (config && config.bridge) || {}),
     ai: Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60 }, (config && config.ai) || {}),
+    exchange: Object.assign({
+      enabled: false, timeoutSeconds: 20, maxPerMinute: 30, maxContextChars: 20000,
+    }, (config && config.exchange) || {}),
     weather: Object.assign({
       enabled: true, directThreshold: 2, approveNeed: 2, rejectNeed: 1,
       timeoutSeconds: 60, cooldownSeconds: 60,
@@ -782,6 +864,10 @@ export function apply(ctx, config) {
   setProtectedPaths(config && config.vote && config.vote.protectedPaths)
   // 面板上刚保存的开关要立刻生效，所以每次都合并一次 liveConfig，而不是只用启动时读到的值。
   const currentPerms = () => Object.assign({}, perms, (liveConfig && liveConfig.permissions) || {})
+  // /mc-exchange 的配置每次请求现读，面板里改完立刻生效（默认关闭）。
+  const currentExchangeConfig = () => Object.assign({
+    enabled: false, timeoutSeconds: 20, maxPerMinute: 30, maxContextChars: 20000,
+  }, (liveConfig && liveConfig.exchange) || {})
   // 写操作统一走适配器：local 包装 mcadmin.ps1 / rcon.mjs，panel 打 Pterodactyl 的 HTTP API。
   // 每次调用时按当前配置现建一个，面板里改完地址不用重启。
   const ADAPTER_ACTIONS = new Set(['start', 'stop', 'restart', 'cmd'])
@@ -914,7 +1000,9 @@ export function apply(ctx, config) {
       try { appendFileSync(join(opsDir, 'data', 'mc-ai.log'), new Date().toISOString() + ' ' + m + '\n') } catch { }
     }
 
-    const askAgent = async (key, text, attachmentItems = []) => {
+    // options.timeoutMs：覆盖默认 ai.timeoutSeconds（/mc-ai 不传，行为不变）；
+    // options.setup：建/恢复 agent 时挂的初始化（/mc-exchange 用来屏蔽工具）。
+    const askAgent = async (key, text, attachmentItems = [], agentCallOptions = {}) => {
       const agents = ctx.get('agents')
       if (!agents || typeof agents.create !== 'function') throw new Error('DSH 没有可用的 agents 服务')
       let agent = aiSessions.get(key)
@@ -926,14 +1014,20 @@ export function apply(ctx, config) {
         const route = defaultModel && typeof defaultModel.currentSelection === 'function'
           ? defaultModel.currentSelection()
           : undefined
+        const createOptions = { sessionId: key, agentOptions: route, meta: { cwd: serverDir } }
+        const resumeOptions = { resumeSessionId: key, agentOptions: route }
+        if (typeof agentCallOptions.setup === 'function') {
+          createOptions.setup = agentCallOptions.setup
+          resumeOptions.setup = agentCallOptions.setup
+        }
         let handle
         try {
-          handle = await agents.create({ sessionId: key, agentOptions: route, meta: { cwd: serverDir } })
+          handle = await agents.create(createOptions)
         } catch (createError) {
           // 玩家之前聊过、会话已经落盘（DSH 重启后内存里的 agent 不在了）：
           // create 会因 session id 已存在而失败，这时恢复旧会话继续聊。
           try {
-            handle = await agents.resume({ resumeSessionId: key, agentOptions: route })
+            handle = await agents.resume(resumeOptions)
           } catch {
             throw createError
           }
@@ -975,7 +1069,9 @@ export function apply(ctx, config) {
           }
         }
       }
-      const timeoutMs = Math.max(5, Number(aiCfg.timeoutSeconds) || 60) * 1000
+      const timeoutMs = Number(agentCallOptions.timeoutMs) > 0
+        ? Math.max(1000, Number(agentCallOptions.timeoutMs))
+        : Math.max(5, Number(aiCfg.timeoutSeconds) || 60) * 1000
       // 优先用 DSH 自己的构造函数，拿不到就手搓一个同形状的消息
       let message = null
       try {
@@ -1042,6 +1138,137 @@ export function apply(ctx, config) {
       return next
     }
 
+    // ── /mc-exchange：AIMCmarket 的市场接口（默认关闭）──
+    // 同一个 HTTP 服务，独立会话 key（mc-exchange:<task>）+ 独立 system prompt（只输出 JSON）。
+    // 关闭时直接 404，不读 body、不建会话、不消耗 token；打开后配置每次请求现读，热生效。
+    const exchangeLog = (m) => {
+      try { appendFileSync(join(opsDir, 'data', MC_EXCHANGE_LOG_NAME), new Date().toISOString() + ' ' + m + '\n') } catch { }
+    }
+    const exchangeHits = []
+    /** 滑动 60 秒全局限流；返回 true 表示这单被限流。 */
+    const exchangeRateLimited = (maxPerMinute) => {
+      const now = Date.now()
+      const windowStart = now - 60000
+      while (exchangeHits.length && exchangeHits[0] <= windowStart) exchangeHits.shift()
+      const limit = Math.round(clampNumber(maxPerMinute, 30, 1, 600))
+      if (exchangeHits.length >= limit) return true
+      exchangeHits.push(now)
+      return false
+    }
+    // exchange 会话不需要工具：建/恢复 agent 时把这个 agent 作用域里的全局工具全部屏蔽。
+    // 好处是 prompt 里没有工具说明、模型只输出 JSON，也堵掉「借工具碰服务器」的路。
+    const exchangeAgentSetup = (agentCtx) => {
+      try {
+        const scopedTools = agentCtx && typeof agentCtx.get === 'function' ? agentCtx.get('tools') : null
+        if (!scopedTools || typeof scopedTools.restrict !== 'function') return
+        const registry = ctx.get('tools')
+        const names = registry && typeof registry.definitions === 'function'
+          ? registry.definitions().map((definition) => String((definition && definition.name) || '')).filter(Boolean)
+          : []
+        if (!names.length) return
+        scopedTools.restrict({ deny: names })
+      } catch (error) {
+        exchangeLog('[exchange] 屏蔽工具失败：' + clipLogMessage(shortErrorMessage(error)))
+      }
+    }
+
+    const handleExchange = async (req, res) => {
+      const send = (code, obj) => {
+        try {
+          res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(obj))
+        } catch { }
+      }
+      const cfg = currentExchangeConfig()
+      if (cfg.enabled !== true) {
+        // 关闭时：不读 body、不建会话、不花 token，只留一行 debug 日志。
+        try { req.resume() } catch { }
+        exchangeLog('[exchange] disabled 拒绝一次请求（设置里 exchange.enabled=false）')
+        return send(404, { ok: false, error: 'exchange disabled' })
+      }
+      const startedAt = Date.now()
+      const body = await readCappedBody(req, MC_EXCHANGE_MAX_BODY_BYTES)
+      if (body.tooBig) return send(400, { ok: false, error: '请求体太大（上限 1MB）' })
+      if (body.error) return send(400, { ok: false, error: body.error })
+      let parsed = null
+      try { parsed = JSON.parse(body.text || '{}') } catch { parsed = null }
+      if (!parsed) {
+        exchangeLog('[exchange] 400 请求体不是合法 JSON')
+        return send(400, { ok: false, error: '请求体不是合法 JSON' })
+      }
+      const request = normalizeExchangeRequest(parsed)
+      if (!request.ok) {
+        exchangeLog('[exchange] 400 ' + clipLogMessage(request.error))
+        return send(400, { ok: false, error: request.error })
+      }
+      const maxPerMinute = clampNumber(cfg.maxPerMinute, 30, 1, 600)
+      if (exchangeRateLimited(maxPerMinute)) {
+        exchangeLog('[exchange] 429 ' + request.task + '（超过 ' + Math.round(maxPerMinute) + ' 次/分钟）')
+        return send(429, { ok: false, error: 'rate limited' })
+      }
+      if (request.task === 'ping') {
+        const data = { version: localVersion() || '0.7.0', tasks: EXCHANGE_AGENT_TASKS.slice() }
+        exchangeLog('[exchange] ping ' + (Date.now() - startedAt) + 'ms ok')
+        return send(200, { ok: true, data, elapsedMs: Date.now() - startedAt })
+      }
+      const timeoutSeconds = clampNumber(cfg.timeoutSeconds, 20, 1, 300)
+      const maxContextChars = clampNumber(cfg.maxContextChars, 20000, 100, 200000)
+      const deadline = startedAt + timeoutSeconds * 1000
+      const context = limitExchangeContext(request.context, maxContextChars)
+      const message = limitExchangeMessage(request.message)
+      const prompt = buildExchangeUserPrompt(request.task, message, context.text)
+      const key = MC_EXCHANGE_SESSION_PREFIX + request.task
+      const taskLog = (succeeded, repaired, extra) => exchangeLog(
+        '[exchange] ' + request.task + ' ' + (Date.now() - startedAt) + 'ms repaired=' + (repaired ? 1 : 0)
+        + ' ok=' + (succeeded ? 1 : 0) + ' ctx=' + context.text.length + (context.truncated ? ' truncated=1' : '')
+        + (extra ? ' ' + extra : ''),
+      )
+      void enqueue(key, async () => {
+        const remaining = () => deadline - Date.now()
+        let lastRaw = ''
+        let repaired = false
+        try {
+          if (remaining() < 1000) throw new Error('排队等待过久，已超时')
+          let reply = await askAgent(key, prompt, [], {
+            timeoutMs: Math.max(1000, remaining()),
+            setup: exchangeAgentSetup,
+          })
+          lastRaw = reply
+          let outcome = parseExchangeReply(request.task, reply)
+          repaired = repaired || outcome.repaired === true
+          if (!outcome.ok) {
+            // JSON 兜底失败：把错误摘要发回模型重试一次（只输出 JSON）；时间不够就不重试。
+            const retryBudget = remaining()
+            if (retryBudget >= 3000) {
+              exchangeLog('[exchange] ' + request.task + ' JSON 校验失败，重试一次：' + clipLogMessage(outcome.error))
+              reply = await askAgent(key, buildExchangeRetryPrompt(outcome.error), [], {
+                timeoutMs: retryBudget,
+                setup: exchangeAgentSetup,
+              })
+              lastRaw = reply
+              outcome = parseExchangeReply(request.task, reply)
+              repaired = repaired || outcome.repaired === true
+            }
+          }
+          if (!outcome.ok) {
+            taskLog(false, repaired, 'reason=' + clipLogMessage(outcome.error))
+            return send(200, { ok: false, error: outcome.error, raw: String(lastRaw || '').slice(0, 600) })
+          }
+          taskLog(true, repaired)
+          return send(200, { ok: true, data: outcome.data, elapsedMs: Date.now() - startedAt })
+        } catch (error) {
+          const messageText = shortErrorMessage(error)
+          taskLog(false, repaired, 'reason=' + clipLogMessage(messageText))
+          return send(200, { ok: false, error: messageText })
+        }
+      }).catch((error) => {
+        // enqueue 本身异常（理论上不会）：兜底回 JSON，别让请求悬着。
+        const messageText = shortErrorMessage(error)
+        exchangeLog('[exchange] ' + request.task + ' 内部错误：' + clipLogMessage(messageText))
+        send(200, { ok: false, error: messageText })
+      })
+    }
+
     const aiServer = createServer((req, res) => {
       const send = (code, obj) => {
         try {
@@ -1053,7 +1280,14 @@ export function apply(ctx, config) {
       if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(remote)) {
         return send(403, { ok: false, error: '只接受本机请求' })
       }
-      if (req.method !== 'POST' || !String(req.url || '').startsWith('/mc-ai')) {
+      // /mc-exchange 和 /mc-ai 共用这个本地服务；/mc-ai 的分支保持原样。
+      const requestUrl = String(req.url || '')
+      if (req.method === 'POST' && requestUrl.split('?')[0] === '/mc-exchange') {
+        return void handleExchange(req, res).catch((error) => {
+          try { send(200, { ok: false, error: shortErrorMessage(error) }) } catch { }
+        })
+      }
+      if (req.method !== 'POST' || !requestUrl.startsWith('/mc-ai')) {
         return send(404, { ok: false, error: 'not found' })
       }
       const chunks = []
@@ -1341,6 +1575,8 @@ export function apply(ctx, config) {
         if (!header) return
         const id = String(header.id ?? '')
         if (!id || isLocalSession(id)) return
+        // /mc-exchange 的会话不给工具，也不需要放宽权限，跳过（少写无意义的 flip 日志）。
+        if (exchangeSessionTask(id)) return
         if (header.parentSession || header.origin === 'subagent') return
         const presets = ctx.get('permissionPresets')
         if (!presets || typeof presets.set !== 'function') return
@@ -1370,6 +1606,8 @@ export function apply(ctx, config) {
   // - write / edit / web_*：需要服主授权（12 小时窗口）。
   ctx.effect(() => tools.guard((exec) => {
     const id = exec.agent && exec.agent.id ? String(exec.agent.id) : ''
+    // /mc-exchange 的会话只输出 JSON：工具在 agent setup 里已经尽量屏蔽，这里再兜底拒绝一次。
+    if (exchangeSessionTask(id)) return '这个会话只输出 JSON，不能调用工具。'
     if (isLocalSession(id)) return undefined
     if (exec.name === 'mc_server') return undefined
 
@@ -1427,6 +1665,13 @@ export function apply(ctx, config) {
       const agentId = context && context.agent ? String(context.agent.id ?? '') : ''
       if (!agentId) return assembled
       const sections = [...(assembled.sections ?? [])]
+      // /mc-exchange 会话：只加「输出 JSON + 当前 task 的 schema」，不注入小铜的人设和能力清单，
+      // 免得市场上下文串进小铜的聊天，也免得人设把 JSON 输出带偏。
+      const exchangeTask = exchangeSessionTask(agentId)
+      if (exchangeTask) {
+        sections.push({ name: 'mc-exchange:json', order: 95, text: exchangeSystemPrompt(exchangeTask) })
+        return { ...assembled, sections }
+      }
       // QQ 会话一律带上能力清单：明确告诉模型天气对所有玩家开放，别再按旧记忆拒绝
       if (!isLocalSession(agentId)) {
         sections.push({ name: 'mc-ops:abilities', order: 90, text: renderAbilities() })
