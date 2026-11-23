@@ -7,7 +7,7 @@
 
 **在 QQ 群里管理 Minecraft 服务器。** 服主不用开电脑、不用记命令——群里发一句话，就能查状态、启停服务器、绑白名单、投票授权；游戏聊天还能直通 QQ 群，不经过 AI、不耗 token。
 
-> 当前版本 **0.7.0** · 更新于 **2026-11-21** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
+> 当前版本 **0.7.1** · 更新于 **2026-11-23** · 以本页和 [npm](https://www.npmjs.com/package/dsh-mc-server-ops) 为准
 
 ## 它解决什么问题
 
@@ -39,6 +39,7 @@
 - **游戏内 AI**：装上配套 mc-ai mod 后（1.3.0 起支持 Forge / NeoForge / Fabric / Bukkit），玩家在游戏里 `/ai <内容>` 就能和「小铜」对话（只监听 `127.0.0.1`，按玩家 UUID 复用独立会话）；mod 1.1.0 起还能带截图/文件附件；1.4.0 起 **Bukkit 插件也有附件桥接**——只装插件的服务器上，装了 mcai-client 1.4.0 的玩家同样能用 `/ai screenshot`、`/ai file`（字节走插件自带 HTTP 上传端口，`plugins/mc-ai/config.yml` 配置）
 - **AI 市场接口**：配套 AIMCmarket 模组（Forge 1.20.1 服务端-only）可用 `POST /mc-exchange` 让 AI 做结构化解析、市场新闻、财报、招股书和政府政策建议；默认关闭、独立会话、严格 JSON、带限流，关掉时不影响任何现有功能
 - **天气投票**：配套 mc-ai mod 1.2.0 起（1.3.0 起所有平台一致），游戏内玩家可用 `/weather` 改天气；在线 ≤2 人直接生效，3 人及以上要 `/vote yes` 投票（2 票同意通过），门槛都能在设置面板改
+- **时间投票**：默认关闭。开启后玩家可要求改游戏时间（白天 / 夜晚 / 中午 / 午夜…），规则照搬天气——在线 ≤2 人直接生效，人多时在游戏聊天栏投票（其他玩家发「同意 / 反对」）。**由插件自己实现，不需要装 mod**
 
 ## 安装
 
@@ -127,6 +128,7 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `time.timeoutSeconds` / `time.cooldownSeconds` | `60` / `60` | 投票有效期 / 同一玩家两次发起的最小间隔（秒） |
 | `ai.playtimeGate` | `true` | 白名单开启时，绑定玩家游戏时长不足门槛前禁止让小铜操作服务器（聊天和查询不受影响；**服主豁免**） |
 | `ai.minPlaytimeMinutes` | `60` | 游戏时长门槛（分钟），按玩家绑定账号里时长最长的一个算 |
+| `ai.trustedPlayers` | `[]` | 免门槛的游戏名（服主自己的小号填这里）：不看绑定、不看时长，和绑定了服主 QQ 的号一样 |
 
 ## 目录结构
 
@@ -135,7 +137,8 @@ dsh-mc-server-ops/
 ├── index.js            # 插件宿主代码：mc_server 工具、权限守卫、人设注入、/mc-ai 与 /mc-exchange
 ├── cordis.patch.yml    # 安装时自动插入的加载行
 ├── test/
-│   └── mc-exchange.mjs # /mc-exchange 测试：纯函数单元校验 + 本机接口矩阵（无第三方依赖）
+│   ├── mc-exchange.mjs # /mc-exchange 测试：纯函数单元校验 + 本机接口矩阵（无第三方依赖）
+│   └── v071.mjs        # 时间参数、游戏时长门槛、配置备份恢复的单元校验
 └── ops/
     ├── command-guard.mjs   # 静态命令拦截：出网前掐掉“一条命令搞崩整个服”的类型
     ├── qq-bridge.mjs       # 群服互通：读日志 → 直连 QQ 开放平台（不经过 AI）
@@ -294,6 +297,8 @@ powershell -File <服务器目录>\ops\mcadmin.ps1 -Action owner-add -Arg <openi
 
 游戏内玩家和群友一样受权限守卫限制：只读查询可以，写文件、执行命令需要服主授权；mod 侧默认每玩家 5 秒冷却，避免刷屏。
 
+**白名单新玩家限制**（`ai.playtimeGate`，默认开）：服务器开着白名单时，**未绑定游戏账号 / 查不到时长 / 游戏时长不足 `ai.minPlaytimeMinutes`（默认 60 分钟）** 的玩家，可以正常和小铜聊天、查状态，但**不能让小铜操作服务器**（改时间、改天气、启停、写文件都不行）。服主豁免：游戏名绑到 `owners.json` 里任一 QQ，或者把名字填进 `ai.trustedPlayers`。时长读 `<服务器目录>/<level-name>/stats/<uuid>.json` 的 `minecraft:play_time`，跟随 `server.properties` 的 `level-name`，兼容 1.12.2 的 `stat.playOneMinute`。
+
 ## AI 市场接口（AIMCmarket，默认关闭）
 
 这是给 [AIMCmarket](https://github.com/mogutofu/dsh-aimcmarket)（Forge 1.20.1 服务端-only 模组）用的结构化接口。模组把「市场先生」和「AI 政府」里需要 AI 的部分（自然语言→订单参数、市场新闻、财报、招股书、政策建议）发过来，DSH 用独立会话和独立 system prompt 只回一个 JSON 对象；扣钱、发货、政策落地这些还是模组自己算。
@@ -366,6 +371,20 @@ node test/mc-exchange.mjs
 - 服务器装的是旧版 mod（< 1.2.0）时，这个配置不会生效，`/weather` 也还是原版需要 OP 的版本
 - **QQ 群里也能改**：玩家先用 `bind-player` 绑定游戏名并进入游戏，然后在群里跟小铜说「把天气改成下雨」即可——小铜会用你的游戏名执行 `weather`，在线 ≤2 人直接生效、≥3 人时游戏内会广播投票（其他玩家 `/vote yes`）。服主在群里说则直接执行。
 
+## 游戏内时间投票（默认关闭）
+
+**不需要 mod**：插件自己读 `logs/latest.log` 的聊天、用 RCON 执行 `time set`。开启后玩家可以要求改时间，规则和天气投票一致：
+
+- 服主/控制台：直接执行，不投票
+- 在线玩家 **≤ `time.directThreshold`（默认 2）**：直接生效
+- **3 人及以上**：在游戏聊天栏广播投票，其他玩家发「**同意**」或「**反对**」即可；发起人自动算 1 票同意
+- 同意达到 `time.approveNeed`（默认 2）通过；反对达到 `time.rejectNeed`（默认 1）作废；`time.timeoutSeconds`（默认 60 秒）没结果也作废
+- 同一玩家两次发起间隔 `time.cooldownSeconds`（默认 60 秒）
+- 投票词只认「同意 / 赞成 / ✓」和「反对 / 拒绝 / ✗」，正常聊天里说「好的」「1」不会误计票
+
+`mc_server` 的 `time` 动作支持 `day` / `noon` / `sunset` / `night` / `midnight` / `sunrise`，也接受中文（白天 / 中午 / 日落 / 夜晚 / 午夜 / 日出）和 0–24000 的 tick 数。QQ 群里让小铜改时间同样走这套规则。
+
+注意：时间投票目前依赖本机日志和本机 PowerShell，`adapter=panel` 或非 Windows 部署下不可用。
 ## 安全模型
 
 - 仓库和 npm 包里**不含任何口令、QQ 号、记忆数据或整合包**。

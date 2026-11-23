@@ -1,6 +1,6 @@
 {
   "name": "dsh-mc-server-ops",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "在 DeepSeek Harness 里托管 Minecraft 服务器的插件：状态/启停/日志/白名单/投票授权，静态命令拦截，本地/Pterodactyl 可插拔适配器，游戏聊天直通 QQ 群（不经过 AI、不耗 token），把人设注入 QQ 会话，并让游戏内玩家用 /ai 和「小铜」对话（配套 mc-ai mod，1.3.0 起支持 Forge/NeoForge/Fabric/Bukkit，1.4.0 起 Bukkit 插件也支持 /ai 附件桥接）。需要先安装 QQ 机器人插件。0.7.0 起新增默认关闭的 POST /mc-exchange 严格 JSON 接口（AIMCmarket 模组用，见 README）。",
   "type": "module",
   "main": "./index.js",
