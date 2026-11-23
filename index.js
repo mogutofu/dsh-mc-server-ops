@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
 import { guardCommand } from './ops/command-guard.mjs'
 import { createAdapter } from './ops/adapters/index.mjs'
-import { createBridge, writeBridgeState, QqApi } from './ops/qq-bridge.mjs'
+import { createBridge, writeBridgeState, QqApi, createLogTail } from './ops/qq-bridge.mjs'
 import { ensureQqbotInboundHook } from './ops/qqbot-hook.mjs'
 import {
   EXCHANGE_AGENT_TASKS,
@@ -32,6 +32,8 @@ const DEFAULT_PERSONA = '你在 QQ 群里叫「小铜」，二十来岁，平时
 const GRANT_MS = 12 * 60 * 60 * 1000
 // 任何会话都能用的只读工具
 const OPEN_READ_TOOLS = ['read', 'glob', 'grep']
+// 查询类动作：玩家和白名单新玩家都能用（不做服务器变更）
+const READ_ONLY_ACTIONS = ['whoami', 'help', 'status', 'players', 'logs', 'crashinfo', 'my-players', 'bind-player', 'unbind-player', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status']
 // 需要服主授权才能用的工具
 const GUARDED_TOOLS = ['write', 'edit', 'pwsh', 'web_fetch', 'web_search']
 // 发文件到 QQ 的工具（玩家可用，但敏感文件除外）
@@ -93,8 +95,111 @@ function isOwner(actor) {
   return readOwners().includes(actor)
 }
 
-/** 读 ops/data/bindings.json：QQ openid 与游戏名的绑定。 */
-function readPlayerBindings() {
+// ─────────────────── 配置备份（防更新重置）───────────────────
+// 插件更新后，profile 里的配置行有可能被包内的默认值覆盖。每次保存/启动都在
+// ops/data/config-backup.json 留一份，启动时如果发现「当前配置全是默认值」而备份不是，
+// 就用备份顶回去，避免用户配好的东西被重置。
+
+function configBackupPath(serverDir) {
+  return join(serverDir, 'ops', 'data', 'config-backup.json')
+}
+
+function readConfigBackup(serverDir) {
+  try {
+    const file = configBackupPath(serverDir)
+    if (!existsSync(file)) return null
+    const doc = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+    if (!doc || typeof doc.config !== 'object' || doc.config === null) return null
+    return doc.config
+  } catch { return null }
+}
+
+function writeConfigBackup(serverDir, cfg) {
+  try {
+    if (!cfg || typeof cfg !== 'object' || !Object.keys(cfg).length) return
+    const file = configBackupPath(serverDir)
+    mkdirSync(dirname(file), { recursive: true })
+    // 备份写进服务器目录，玩家用 read 就能看到；把密钥类字段剔掉，只留非敏感配置。
+    const safe = JSON.parse(JSON.stringify(cfg))
+    const scrub = (obj, keys) => { if (!obj || typeof obj !== 'object') return; for (const k of keys) if (k in obj) obj[k] = '' }
+    scrub(safe.server || {}, ['rconPassword'])
+    scrub(safe.bridge || {}, ['appSecret'])
+    scrub(safe.panel || {}, ['clientApiKey'])
+    writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), config: safe }, null, 2), 'utf8')
+  } catch { /* 备份写不了不影响主流程 */ }
+}
+
+/** 当前配置是否完全是 schema 默认值。 */
+function isDefaultPluginConfig(cfg) {
+  try {
+    return JSON.stringify(Config(cfg || {})) === JSON.stringify(Config({}))
+  } catch { return false }
+}
+
+/** 启动时的兜底：配置被重置成默认值、而备份里有用户配置时，用备份。 */
+function restoreConfigIfReset(serverDir, incoming) {
+  try {
+    if (!incoming || typeof incoming !== 'object') return incoming
+    const backup = readConfigBackup(serverDir)
+    if (!backup) return incoming
+    if (isDefaultPluginConfig(incoming) && !isDefaultPluginConfig(backup)) return backup
+  } catch { /* 兜底失败就用传入的 */ }
+  return incoming
+}
+
+/** 按目录读绑定（模块级版本，给测试和 QQ 门槛复用）。 */
+function readBindingsFrom(serverDir) {
+  try {
+    const raw = readFileSync(join(serverDir || paths.serverDir, 'ops', 'data', 'bindings.json'), 'utf8').replace(/^\uFEFF/, '')
+    const doc = JSON.parse(raw)
+    return Array.isArray(doc)
+      ? doc.map((x) => ({ qq: String((x && x.qq) || ''), name: String((x && x.name) || '') })).filter((x) => x.qq && x.name)
+      : []
+  } catch { return [] }
+}
+
+/**
+ * QQ 侧门槛：白名单开启时，未绑定 / 查不到时长 / 时长不足 都不许操作服务器。
+ * 返回 { gated, reason: '' | 'unbound' | 'unknown' | 'short', minutes, need, name }
+ */
+function playtimeGateForQqFor(qq, cfg, serverDir) {
+  const c = cfg || {}
+  const rawNeed = Number(c.minPlaytimeMinutes); const need = Number.isFinite(rawNeed) ? Math.max(0, rawNeed) : 60
+  const result = { gated: false, minutes: null, need, name: '', reason: '' }
+  if (c.playtimeGate === false) return result
+  if (!whitelistEnabled(serverDir)) return result
+  if (readOwnersList(join(serverDir || paths.serverDir, 'ops')).includes(String(qq || ''))) return result
+  const names = readBindingsFrom(serverDir).filter((b) => b.qq === qq).map((b) => b.name)
+  if (!names.length) { result.gated = true; result.reason = 'unbound'; return result }
+  // 免门槛名单里的游戏名：直接放行
+  const trusted = Array.isArray(c.trustedPlayers) ? c.trustedPlayers.map((x) => String(x || '').trim().toLowerCase()) : []
+  if (trusted.length && names.some((n) => trusted.includes(String(n).toLowerCase()))) return result
+  let best = null
+  for (const name of names) {
+    const minutes = readPlaytimeMinutes(name, serverDir)
+    if (minutes === null) continue
+    if (best === null || minutes > best) { best = minutes; result.name = name }
+  }
+  result.minutes = best
+  if (best === null) { result.gated = true; result.reason = 'unknown'; return result }
+  result.gated = best < need
+  result.reason = result.gated ? 'short' : ''
+  return result
+}
+
+/**
+ * 保存配置时的备份策略：如果这次提交的是「全默认值」，而备份里有用户配置，
+ * 就不覆盖备份——防止面板显示默认值时误操作把用户配置永久冲掉。
+ */
+function saveConfigBackupSafe(cfg) {
+  try {
+    const backup = readConfigBackup(paths.serverDir)
+    if (backup && isDefaultPluginConfig(cfg) && !isDefaultPluginConfig(backup)) return
+    writeConfigBackup(paths.serverDir, cfg)
+  } catch { /* 备份失败不影响保存 */ }
+}
+
+/** 读 ops/data/bindings.json：QQ openid 与游戏名的绑定。 */function readPlayerBindings() {
   try {
     const raw = readFileSync(join(paths.serverDir, 'ops', 'data', 'bindings.json'), 'utf8').replace(/^\uFEFF/, '')
     const doc = JSON.parse(raw)
@@ -112,6 +217,153 @@ function parseOnlinePlayers(text) {
   if (!match) return []
   return match[1].split(',').map((x) => x.trim()).filter(Boolean)
 }
+
+// ─────────────────── 时间投票 / 游戏时长 ───────────────────
+
+/** 时间预设：key → { ticks, name }。ticks 直接喂给 /time set。 */
+const TIME_PRESETS = {
+  day: { ticks: 1000, name: '白天' },
+  noon: { ticks: 6000, name: '正午' },
+  sunset: { ticks: 12000, name: '日落' },
+  night: { ticks: 13000, name: '夜晚' },
+  midnight: { ticks: 18000, name: '午夜' },
+  sunrise: { ticks: 23000, name: '日出' },
+}
+const TIME_ALIASES = {
+  白天: 'day', 早上: 'day', 天亮了: 'day',
+  正午: 'noon', 中午: 'noon',
+  日落: 'sunset', 黄昏: 'sunset',
+  夜晚: 'night', 晚上: 'night', 天黑: 'night',
+  午夜: 'midnight', 半夜: 'midnight',
+  日出: 'sunrise', 早上好: 'sunrise',
+}
+
+/** 时间参数规范化：预设名 / 中文别名 / 0-24000 的 tick 数。不认识返回 null。 */
+function normalizeTimeArg(arg) {
+  const raw = String(arg === undefined || arg === null ? '' : arg).trim()
+  if (!raw) return null
+  const lower = raw.toLowerCase()
+  if (TIME_PRESETS[lower]) return { key: lower, ticks: TIME_PRESETS[lower].ticks, name: TIME_PRESETS[lower].name }
+  if (TIME_ALIASES[raw]) {
+    const key = TIME_ALIASES[raw]
+    return { key, ticks: TIME_PRESETS[key].ticks, name: TIME_PRESETS[key].name }
+  }
+  if (/^\d{1,5}$/.test(raw)) {
+    const ticks = Math.max(0, Math.min(24000, Number(raw)))
+    return { key: String(ticks), ticks, name: ticks + ' ticks' }
+  }
+  return null
+}
+
+/** 投票用的一句话：去掉换行和颜色码。 */
+function sanitizeBroadcast(text) {
+  return String(text || '')
+    .replace(/§./g, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200)
+}
+
+/** 读 server.properties 的某个键（键名不区分大小写）。 */
+function readServerProperty(key, serverDir) {
+  try {
+    const file = join(serverDir || paths.serverDir, 'server.properties')
+    if (!existsSync(file)) return ''
+    const target = String(key || '').toLowerCase()
+    for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const m = /^([^=#][^=]*)=(.*)$/.exec(line)
+      if (m && m[1].trim().toLowerCase() === target) return m[2].trim()
+    }
+  } catch { /* 读不到当没有 */ }
+  return ''
+}
+
+/** 服务器是否开着白名单。 */
+/** 白名单状态：是否开启 + 名单人数，给设置面板显示用。 */
+function readWhitelistState(serverDir) {
+  const dir = serverDir || paths.serverDir
+  const state = { enabled: whitelistEnabled(dir), count: 0, enforce: false }
+  try {
+    const file = join(dir, 'whitelist.json')
+    if (existsSync(file)) {
+      const list = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+      if (Array.isArray(list)) state.count = list.length
+    }
+  } catch { /* 读不到就当 0 */ }
+  try { state.enforce = readServerProperty('enforce-whitelist', dir).toLowerCase() === 'true' } catch { }
+  return state
+}
+
+function whitelistEnabled(serverDir) {
+  return readServerProperty('white-list', serverDir).toLowerCase() === 'true'
+}
+
+/** 游戏名 → uuid（usercache.json）。找不到返回空串。 */
+function findPlayerUuid(name, serverDir) {
+  const dir = serverDir || paths.serverDir
+  const target = String(name || '').toLowerCase()
+  if (!target) return ''
+  // usercache.json 是滚动缓存，只留最近登录的几个人；名字→uuid 必须以 whitelist.json 为准，
+  // 否则老玩家/新号查不到 uuid，会被当成「无法判断」直接放行（游戏时长门槛就失效了）。
+  for (const file of ['whitelist.json', 'usercache.json', 'ops.json']) {
+    try {
+      const path = join(dir, file)
+      if (!existsSync(path)) continue
+      const list = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''))
+      if (!Array.isArray(list)) continue
+      const hit = list.find((x) => String((x && x.name) || '').toLowerCase() === target)
+      if (hit && hit.uuid) return String(hit.uuid)
+    } catch { /* 换下一个来源 */ }
+  }
+  return ''
+}
+
+/**
+ * 玩家累计游戏时长（分钟）。读 world/stats/<uuid>.json 里的 play_time（单位是 tick）。
+ * 找不到玩家/统计文件时返回 null，表示「无法判断」——调用方应放行，不能误伤。
+ */
+/** 按 uuid 直接读时长（/mc-ai 请求里就带 uuid，比名字可靠，没绑定的号也能算）。 */
+function readPlaytimeByUuid(uuid, serverDir) {
+  const id = String(uuid || '').trim()
+  if (!id) return null
+  const dir = serverDir || paths.serverDir
+  const file = join(statsDirOf(dir), id + '.json')
+  if (!existsSync(file)) return 0
+  try {
+    const doc = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+    const custom = (doc && doc.stats && doc.stats['minecraft:custom']) || {}
+    const ticks = Number(custom['minecraft:play_time'] !== undefined ? custom['minecraft:play_time'] : doc['stat.playOneMinute'])
+    if (Number.isFinite(ticks) && ticks >= 0) return ticks / 20 / 60
+    return 0
+  } catch { return null }
+}
+
+/** 统计目录：跟随 server.properties 的 level-name（默认 world）。 */
+function statsDirOf(serverDir) {
+  const dir = serverDir || paths.serverDir
+  const level = readServerProperty('level-name', dir) || 'world'
+  return join(dir, level, 'stats')
+}
+
+function readPlaytimeMinutes(name, serverDir) {
+  const dir = serverDir || paths.serverDir
+  const uuid = findPlayerUuid(name, dir)
+  if (!uuid) return null
+  const file = join(statsDirOf(dir), uuid + '.json')
+  if (!existsSync(file)) return 0
+  try {
+    const doc = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+    const custom = (doc && doc.stats && doc.stats['minecraft:custom']) || {}
+    const ticks = Number(custom['minecraft:play_time'] !== undefined ? custom['minecraft:play_time'] : doc['stat.playOneMinute'])
+    if (Number.isFinite(ticks) && ticks >= 0) return ticks / 20 / 60
+    return 0
+  } catch { return null }
+}
+
+/** 投票用的同意/反对关键词。 */
+const VOTE_YES_RE = /^(同意|赞成|支持|✓|\+1)$/i
+const VOTE_NO_RE = /^(反对|拒绝|否决|✗|-1)$/i
 
 /** 天气类型规范化；不认识的返回空串。 */
 const WEATHER_NAMES = { clear: '晴天', rain: '下雨', thunder: '雷雨' }
@@ -156,7 +408,7 @@ function readQqbotCredentials() {
 
 const ACTIONS = [
   'status', 'players', 'say', 'cmd', 'start', 'stop', 'restart',
-  'logs', 'crashinfo', 'whoami', 'help', 'gamemode', 'weather',
+  'logs', 'crashinfo', 'whoami', 'help', 'gamemode', 'weather', 'time',
   'bind-player', 'unbind-player', 'my-players', 'bindings', 'whitelist-sync',
   'kubejs-backup', 'kubejs-reload', 'vote-start', 'vote-approve', 'vote-reject', 'vote-status',
   'export-data', 'import-data', 'bridge-groups',
@@ -214,6 +466,7 @@ const DESCRIPTION = [
   '- restart：服务器确认关闭、或健康=无响应（假死）时任何人可用（假死会自动强杀重启）；健康=正常或启动中时仅服主',
   '- gamemode：切换游戏模式，arg 形如 spectator 玩家名。玩家只能切 survival / spectator，且目标必须是自己绑定的游戏名；creative / adventure 和切别人仅服主',
   '- weather：改天气，arg 为 clear / rain / thunder（也可写 晴天 / 下雨 / 雷雨）。所有玩家都能用：自己的游戏名在线时，小铜会用他的游戏名发起——在线 ≤2 人直接生效，≥3 人时游戏内会广播投票（其他玩家 /vote yes）；服主则直接执行。不要因为 cmd 仅服主就拒绝玩家的天气请求',
+  '- time：改游戏时间，arg 为 day / noon / sunset / night / midnight / sunrise（也可写 白天 / 中午 / 日落 / 夜晚 / 午夜 / 日出）或 0-24000 的 tick 数。默认在设置里关闭；开启后规则和天气一样：服主直接执行，在线 ≤ 阈值直接生效，人多时在游戏聊天栏发起投票（其他玩家发「同意」/「反对」，发起人自动算 1 票）',
   '- cmd：执行任意后台指令（op/deop/ban/kick/whitelist 等），仅服主',
   '',
   '玩家还能做：用 read / glob / grep 看服务器文件、用只读的 pwsh 命令查信息、用 qqbot_send_file 把普通文件发到群里（口令/密钥类文件除外）、用 weather 改天气。',
@@ -428,8 +681,53 @@ export const inject = ['tools']
 export { isProtectedPath, setProtectedPaths }
 // 诊断/测试用：版本比较与「查最新版本」
 export { compareVersions, checkLatestVersion }
+/** 测试/诊断用：直接按「游戏名 + 配置」算门槛状态（不依赖 apply 内的闭包）。 */
+/**
+ * 这个游戏名是不是绑到了某个服主 QQ 上。
+ * 服主不受「绑定 + 游戏时长」限制：他本人玩新号也不该被门槛挡住。
+ */
+function playerIsOwnerGameName(name, serverDir) {
+  try {
+    const target = String(name || '').toLowerCase()
+    if (!target) return false
+    const dir = serverDir || paths.serverDir
+    const owners = readOwnersList(join(dir, 'ops'))
+    if (!owners.length) return false
+    let bindings = null
+    try {
+      bindings = JSON.parse(readFileSync(join(dir, 'ops', 'data', 'bindings.json'), 'utf8').replace(/^\uFEFF/, ''))
+    } catch { return false }
+    if (!Array.isArray(bindings)) return false
+    return bindings.some((b) => String((b && b.name) || '').toLowerCase() === target
+      && owners.includes(String((b && b.qq) || '')))
+  } catch { return false }
+}
+
+function playtimeGateStateFor(name, cfg, serverDir, uuid) {
+  const c = cfg || {}
+  const rawNeed = Number(c.minPlaytimeMinutes); const need = Number.isFinite(rawNeed) ? Math.max(0, rawNeed) : 60
+  const state = { gated: false, minutes: null, need, name: String(name || '') }
+  const byUuid = () => readPlaytimeByUuid(uuid, serverDir)
+  if (c.playtimeGate === false) return state
+  // 服主豁免：绑定了服主 QQ 的游戏名，或手填进 trustedPlayers 的名字
+  if (playerIsOwnerGameName(state.name, serverDir)) return state
+  const trusted = Array.isArray(c.trustedPlayers) ? c.trustedPlayers : []
+  if (trusted.some((x) => String(x || '').trim().toLowerCase() === state.name.toLowerCase())) return state
+  if (!whitelistEnabled(serverDir)) return state
+  if (!state.name && !uuid) return state
+  // 请求里带了 uuid 就直接按 uuid 读（没绑定的号也能算）；否则按名字查
+  const uuidOk = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(uuid || ''))
+  const minutes = uuidOk ? byUuid() : readPlaytimeMinutes(state.name, serverDir)
+  state.minutes = minutes
+  if (minutes === null) return state
+  state.gated = minutes < need
+  return state
+}
+
 // 诊断/测试用：自更新用到的两个内部函数
 export { runCommand, findProfileDir }
+// 诊断/测试用：时间投票 / 游戏时长 / 配置备份
+export { normalizeTimeArg, readPlaytimeMinutes, playtimeGateForQqFor, readConfigBackup, writeConfigBackup, restoreConfigIfReset, isDefaultPluginConfig, playtimeGateStateFor, whitelistEnabled, playerIsOwnerGameName }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 // 跨平台的只读动作：Windows 上走 PowerShell（信息更全），其它平台走 Node 核心
@@ -493,6 +791,21 @@ export const Config = Schema.object({
       .description('同一玩家两次发起的最小间隔（秒，默认 60，0 = 不限）'),
   }).description('游戏内天气投票（配套 mcai mod）'),
 
+  time: Schema.object({
+    enabled: Schema.boolean().default(false)
+      .description('允许玩家投票改游戏时间（默认关闭，插件自己实现，不需要 mod）。玩家在游戏里说「改成白天」或群里要求时：在线人少直接改，人多在游戏聊天栏投票'),
+    directThreshold: Schema.number().min(0).max(20).default(2)
+      .description('在线玩家不超过这个数时直接改时间、不投票（默认 2：0-2 人直接生效）'),
+    approveNeed: Schema.number().min(1).max(20).default(2)
+      .description('投票通过需要几人同意（发起人自动算 1 票；默认 2）'),
+    rejectNeed: Schema.number().min(1).max(20).default(1)
+      .description('几人反对就作废（默认 1 = 一票否决）'),
+    timeoutSeconds: Schema.number().min(5).max(3600).default(60)
+      .description('投票有效期（秒，默认 60）'),
+    cooldownSeconds: Schema.number().min(0).max(86400).default(60)
+      .description('同一玩家两次发起的最小间隔（秒，默认 60，0 = 不限）'),
+  }).description('游戏内时间投票（插件自己实现）'),
+
   adapter: Schema.union(['local', 'panel']).default('local')
     .description('写操作走哪条路：local=本机直接跑脚本（默认）；panel=通过 Pterodactyl 面板的 HTTP API 启停/发指令'),
   panel: Schema.object({
@@ -535,6 +848,12 @@ export const Config = Schema.object({
       .description('允许游戏内玩家用 /ai 和小铜对话（需要配套的 Forge mod；只监听 127.0.0.1）'),
     port: Schema.number().default(8765).description('mod 连接的端口，默认 8765'),
     timeoutSeconds: Schema.number().default(60).description('等待 AI 回复的超时时间（秒）'),
+    playtimeGate: Schema.boolean().default(true)
+      .description('白名单开启时，已绑定游戏账号但游戏时长不足门槛的玩家，禁止让小铜执行服务器操作（聊天不受影响）。默认开启'),
+    minPlaytimeMinutes: Schema.number().min(0).max(100000).default(60)
+      .description('游戏时长门槛（分钟，默认 60）'),
+    trustedPlayers: Schema.array(Schema.string()).default([])
+      .description('免门槛的游戏名（服主自己的号，一行一个）。填进来的名字不看绑定、不看游戏时长，和绑定了服主 QQ 的号一样'),
   }).description('游戏内 AI 对话'),
 
   exchange: Schema.object({
@@ -756,6 +1075,12 @@ async function handleUpdateRoute(req, res) {
 }
 
 export function apply(ctx, config) {
+  // 配置兜底：更新插件后若配置行被重置成默认值，用 ops/data/config-backup.json 顶回去。
+  {
+    const preServer = String(((config && config.server) || {}).dir || process.env.MC_SERVER_DIR || 'D:\\server').replace(/[\\/]+$/, '')
+    config = restoreConfigIfReset(preServer, config)
+    writeConfigBackup(preServer, config)
+  }
   const perms = Object.assign({
     voteEscalation: true,
     kubejsEdit: true,
@@ -839,7 +1164,9 @@ export function apply(ctx, config) {
       },
       maxPerDay: 900,
     }, (config && config.bridge) || {}),
-    ai: Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60 }, (config && config.ai) || {}),
+    ai: Object.assign({ enabled: true, port: 8765, timeoutSeconds: 60, playtimeGate: true, minPlaytimeMinutes: 60, trustedPlayers: [] }, (config && config.ai) || {}),
+    permissions: Object.assign({}, perms),
+    vote: Object.assign({ approveNeed: 2, rejectNeed: 1, timeoutMinutes: 15, vetoEnabled: true, protectedPaths: DEFAULT_PROTECTED.slice() }, (config && config.vote) || {}),
     exchange: Object.assign({
       enabled: false, timeoutSeconds: 20, maxPerMinute: 30, maxContextChars: 20000,
     }, (config && config.exchange) || {}),
@@ -847,6 +1174,10 @@ export function apply(ctx, config) {
       enabled: true, directThreshold: 2, approveNeed: 2, rejectNeed: 1,
       timeoutSeconds: 60, cooldownSeconds: 60,
     }, (config && config.weather) || {}),
+    time: Object.assign({
+      enabled: false, directThreshold: 2, approveNeed: 2, rejectNeed: 1,
+      timeoutSeconds: 60, cooldownSeconds: 60,
+    }, (config && config.time) || {}),
   }
   // 启动时先把天气投票配置写到服务器 config/mcai-weather.json；mod 每次 /weather 都读这个文件。
   writeWeatherConfig(serverDir, liveConfig.weather)
@@ -985,6 +1316,143 @@ export function apply(ctx, config) {
       if (tick.unref) tick.unref()
       return () => { clearInterval(tick); bridge.stop() }
     })
+  }
+
+  // ── 游戏内时间投票（插件自己实现，不需要 mod）──
+  // 玩家要求改时间：在线人少直接改；人多就在游戏聊天栏发起投票，玩家发「同意 / 反对」。
+  // 复用 qq-bridge 的日志增量读取来听聊天（不依赖群服互通开关）。
+  const timeState = { vote: null }
+  const timeCooldown = new Map()
+
+  const broadcastInGame = async (text) => {
+    const msg = sanitizeBroadcast(text)
+    if (!msg) return { ok: false, text: '空消息' }
+    return runMcAdmin(['-Action', 'cmd', '-Arg', 'say ' + msg, '-Actor', 'LOCAL-CONSOLE', '-Channel', 'console'], 60000)
+  }
+
+  const applyTimeTarget = async (target) => runMcAdmin(
+    ['-Action', 'cmd', '-Arg', 'time set ' + target.key, '-Actor', 'LOCAL-CONSOLE', '-Channel', 'console'],
+    60000,
+  )
+
+  const clearTimeVote = () => {
+    if (!timeState.vote) return
+    try { clearTimeout(timeState.vote.timer) } catch { }
+    timeState.vote = null
+  }
+
+  const settleTimeVote = async (outcome) => {
+    const vote = timeState.vote
+    if (!vote) return
+    clearTimeVote()
+    if (vote.by) timeCooldown.set(vote.by, Date.now())
+    if (outcome === 'passed') {
+      const done = await applyTimeTarget(vote.target)
+      await broadcastInGame(done.ok
+        ? '【投票通过】时间已改成「' + vote.target.name + '」。'
+        : '【投票通过】但改时间失败：' + String(done.text || '').slice(0, 60))
+      return
+    }
+    const why = outcome === 'rejected' ? '被否决' : '超时作废'
+    await broadcastInGame('【投票' + why + '】把时间改成「' + vote.target.name + '」的提案没有通过。')
+  }
+
+  const startTimeVote = async ({ target, by, initiatorName }) => {
+    if (timeState.vote) {
+      return {
+        ok: false,
+        text: '现在已经有时间投票在进行（改成「' + timeState.vote.target.name + '」），等它结束再来。',
+      }
+    }
+    const cfg = (liveConfig && liveConfig.time) || {}
+    const need = Math.max(1, Number(cfg.approveNeed) || 2)
+    const rejectNeed = Math.max(1, Number(cfg.rejectNeed) || 1)
+    const timeout = Math.max(5, Number(cfg.timeoutSeconds) || 60)
+    const approve = new Set()
+    if (initiatorName) approve.add(String(initiatorName).toLowerCase())
+    const id = 'T' + String(Date.now()).slice(-5)
+    const vote = { id, target, by, approve, reject: new Set(), need, rejectNeed, timer: null }
+    vote.timer = setTimeout(() => { void settleTimeVote('expired') }, timeout * 1000)
+    if (vote.timer.unref) vote.timer.unref()
+    timeState.vote = vote
+    const sent = await broadcastInGame('【投票 ' + id + '】把时间改成「' + target.name + '」（发起人 '
+      + (initiatorName || by || '玩家') + '）。' + timeout + ' 秒内在聊天栏发「同意」或「反对」，需要 '
+      + need + ' 人同意。')
+    if (!sent.ok) {
+      clearTimeVote()
+      return { ok: false, text: '发起投票失败（游戏内广播发不出去）：' + String(sent.text || '').slice(0, 80) }
+    }
+    // approveNeed 可能被设成 1：发起人这一票就够了，立刻结算
+    if (approve.size >= need) { void settleTimeVote('passed') }
+    return {
+      ok: true,
+      text: '已在游戏里发起投票（编号 ' + id + '）：把时间改成「' + target.name + '」。'
+        + '其他玩家在聊天栏发「同意」即可，还差 ' + Math.max(0, need - approve.size) + ' 票；'
+        + '有人发「反对」会立刻作废。' + timeout + ' 秒内没凑够就自动过期。',
+    }
+  }
+
+  const handleTimeVoteChat = (evt) => {
+    const cfg = (liveConfig && liveConfig.time) || {}
+    if (cfg.enabled !== true) return
+    const vote = timeState.vote
+    if (!vote || !evt || evt.type !== 'chat') return
+    const text = String(evt.text || '').trim().replace(/[，。！？!?,.~\s]+$/g, '')
+    const player = String(evt.player || '')
+    if (!player) return
+    const yes = VOTE_YES_RE.test(text)
+    const no = VOTE_NO_RE.test(text)
+    if (!yes && !no) return
+    const who = player.toLowerCase()
+    if (yes) {
+      if (vote.reject.has(who) || vote.approve.has(who)) return
+      vote.approve.add(who)
+      if (vote.approve.size >= vote.need) { void settleTimeVote('passed'); return }
+      void broadcastInGame('【投票 ' + vote.id + '】' + player + ' 同意（' + vote.approve.size + '/' + vote.need + '）。')
+      return
+    }
+    if (vote.approve.has(who) || vote.reject.has(who)) return
+    vote.reject.add(who)
+    if (vote.reject.size >= vote.rejectNeed) { void settleTimeVote('rejected'); return }
+    void broadcastInGame('【投票 ' + vote.id + '】' + player + ' 反对（' + vote.reject.size + '/' + vote.rejectNeed + '）。')
+  }
+
+  const timeTail = createLogTail(serverDir, (evt) => {
+    try { handleTimeVoteChat(evt) } catch { /* 单条聊天失败不影响 */ }
+  }, { intervalMs: 700 })
+  ctx.effect(() => {
+    timeTail.startAtEnd()
+    timeTail.start()
+    return () => { timeTail.stop(); clearTimeVote() }
+  })
+
+  // ── 游戏时长门槛 ──
+  // 白名单开启时，已绑定但游戏时长不足门槛的玩家，禁止让小铜操作服务器（聊天照常）。
+  const playtimeGatedSessions = new Set()
+  const playtimeGateCfg = () => (liveConfig && liveConfig.ai) || {}
+  const gateLog = (m) => { try { appendFileSync(join(opsDir, 'data', 'mc-ai.log'), new Date().toISOString() + ' ' + m + '\n') } catch { } }
+
+  /** 单个游戏名的门槛状态；无法判断（没 stat 文件）时 gated=false，不误伤。 */
+  const playtimeGateState = (name) => playtimeGateStateFor(name, playtimeGateCfg(), paths.serverDir)
+
+  /** QQ openid → 他绑定的游戏账号里时长最长的那个。 */
+  const playtimeGateForQq = (qq) => playtimeGateForQqFor(qq, playtimeGateCfg(), paths.serverDir)
+
+  /** 每次 /mc-ai 请求都按最新时长刷新这个会话的门槛状态。 */
+  const refreshPlaytimeGate = (key, playerName, uuid) => {
+    try {
+      const st = playtimeGateStateFor(playerName, playtimeGateCfg(), paths.serverDir, uuid)
+      // 门槛判定写进 mc-ai.log，方便排查「为什么这个人被拦/没被拦」
+      gateLog('[gate] ' + (playerName || '?') + ' uuid=' + String(uuid || '').slice(0, 8)
+        + ' 时长=' + (st.minutes === null ? '未知' : Math.round(st.minutes) + '分')
+        + ' 门槛=' + Math.round(st.need) + '分 白名单=' + (whitelistEnabled(paths.serverDir) ? 'on' : 'off')
+        + ' → ' + (st.gated ? '拦截' : '放行'))
+      if (st.gated) playtimeGatedSessions.add(key)
+      else playtimeGatedSessions.delete(key)
+    } catch (error) {
+      gateLog('[gate] 判定失败：' + (error && error.message ? error.message : String(error)))
+      playtimeGatedSessions.delete(key)
+    }
   }
 
   // ── 游戏内 AI 对话：给 Forge mod 的本地 HTTP 入口 ──
@@ -1323,6 +1791,7 @@ export function apply(ctx, config) {
         if (!text && !attachmentItems.length) return send(400, { ok: false, error: '内容不能为空' })
         const attSummary = describeMcAiAttachments(attachmentItems)
         const key = 'mc-ai:' + (uuid || player)
+        refreshPlaytimeGate(key, player, uuid)
         const startedAt = Date.now()
         enqueue(key, async () => {
           try {
@@ -1419,6 +1888,37 @@ export function apply(ctx, config) {
         }
       }
       const agentIdForGate = exec && exec.agent && exec.agent.id ? String(exec.agent.id) : ''
+      // 白名单 + 绑定但游戏时长不足：禁止用 AI 做服务器操作（查询类放行，聊天不受影响）。
+      // 游戏内 AI 会话（mc-ai:<uuid>）由 tools.guard 按 uuid 判定门槛，这里不要再按
+      // actor（模型会填玩家名，不是 QQ）判一次，否则老玩家会被当成「未绑定」误拦。
+      const isMcAiSession = agentIdForGate.startsWith('mc-ai:')
+      if (!isOwner(actor) && !isMcAiSession && !isLocalSession(agentIdForGate) && !READ_ONLY_ACTIONS.includes(action)) {
+        const gate = playtimeGateForQq(actor)
+        if (gate.gated) {
+          gateLog('[gate] ' + actor.slice(0, 8) + ' action=' + action + ' 未通过：' + gate.reason
+            + ' 时长=' + (gate.minutes === null ? '未知' : Math.round(gate.minutes) + '分') + ' 门槛=' + Math.round(gate.need))
+          if (gate.reason === 'unbound') {
+            return {
+              ok: false,
+              text: '白名单开启时，没绑定游戏账号就没法验证游戏时长，暂时不能让小铜操作服务器。'
+                + '先用 bind-player 绑定你的游戏名（进服玩够 ' + Math.round(gate.need) + ' 分钟），查询状态和聊天不受影响。',
+            }
+          }
+          if (gate.reason === 'unknown') {
+            return {
+              ok: false,
+              text: '查不到你绑定账号（' + (gate.name || '?') + '）的游戏时长，白名单开启时暂时不能让小铜操作服务器。'
+                + '确认这个号至少进过一次服，或者找服主处理；查询状态和聊天不受影响。',
+            }
+          }
+          return {
+            ok: false,
+            text: '你绑定的游戏账号「' + (gate.name || '?') + '」游戏时长才 '
+              + Math.round(gate.minutes) + ' 分钟（门槛 ' + Math.round(gate.need) + ' 分钟），'
+              + '暂时不能让小铜操作服务器。查询状态、聊天不受影响，玩够时间再试。',
+          }
+        }
+      }
       if ((action === 'owner-add' || action === 'owner-del') && !isLocalSession(agentIdForGate)) {
         return { ok: false, text: '增删服主只能在设置面板里做，或者到服务器本机执行。' }
       }
@@ -1496,6 +1996,7 @@ export function apply(ctx, config) {
         }
         const mine = readPlayerBindings().filter((b) => b.qq === actor).map((b) => b.name)
         const playersResult = await runMcAdmin(['-Action', 'players', '-Actor', actor, '-Channel', channel], 30000)
+        if (!playersResult.ok) return { ok: false, text: '拿不到在线人数（players 失败），稍后再试，避免绕过投票。' }
         const online = parseOnlinePlayers(playersResult.ok ? playersResult.text : '')
         const onlineName = mine.find((name) => online.some((p) => p.toLowerCase() === name.toLowerCase()))
         // 没有绑定或不在线时：在线人少（≤ 免投票阈值）不需要身份也能直接生效。
@@ -1518,6 +2019,59 @@ export function apply(ctx, config) {
           ? '当前在线 ' + online.length + ' 人（≤' + threshold + '），会直接生效'
           : '当前在线 ' + online.length + ' 人，游戏里已经发起投票，需要 ' + approveNeed + ' 票同意（其他玩家输入 /vote yes）'
         return { ok: true, text: '已用你的游戏名 ' + onlineName + ' 发起：把天气改成「' + typeName + '」。' + how + '。' }
+      }
+
+      // 时间投票：玩法照搬天气——服主直接执行；玩家在线人少直接生效，人多走游戏内聊天投票。
+      if (action === 'time') {
+        const timeCfg = (liveConfig && liveConfig.time) || {}
+        if (timeCfg.enabled !== true) {
+          return { ok: false, text: '时间投票已经在设置里关掉了（设置 → 游戏内时间投票，默认关闭）。' }
+        }
+        const target = normalizeTimeArg(arg)
+        if (!target) {
+          return { ok: false, text: '用法：time <day|noon|sunset|night|midnight|sunrise|0-24000>（也可以写 白天 / 夜晚 / 中午 / 午夜 …）' }
+        }
+        const threshold = Math.max(0, Number(timeCfg.directThreshold) || 0)
+        const cooldownMs = Math.max(0, Number(timeCfg.cooldownSeconds) || 0) * 1000
+        const lastAt = timeCooldown.get(actor) || 0
+        if (cooldownMs > 0 && !isOwner(actor) && Date.now() - lastAt < cooldownMs) {
+          const wait = Math.ceil((cooldownMs - (Date.now() - lastAt)) / 1000)
+          return { ok: false, text: '刚改过时间，' + wait + ' 秒后再来。' }
+        }
+        if (isOwner(actor)) {
+          const done = await applyTimeTarget(target)
+          if (!done.ok) return { ok: false, text: '改时间失败：' + done.text }
+          timeCooldown.set(actor, Date.now())
+          return { ok: true, text: '时间已改成「' + target.name + '」（服主直接执行，不投票）。' }
+        }
+        const mine = readPlayerBindings().filter((b) => b.qq === actor).map((b) => b.name)
+        const playersResult = await runMcAdmin(['-Action', 'players', '-Actor', actor, '-Channel', channel], 30000)
+        if (!playersResult.ok) return { ok: false, text: '拿不到在线人数（players 失败），稍后再试，避免绕过投票。' }
+        const online = parseOnlinePlayers(playersResult.text)
+        // 游戏内 /ai 传进来的 actor 可能就是玩家名：名字在线也算有效候选
+        const actorAsName = online.find((p) => p.toLowerCase() === String(actor).toLowerCase())
+        const candidates = (actorAsName && !mine.some((n) => n.toLowerCase() === actorAsName.toLowerCase())) ? mine.concat([actorAsName]) : mine
+        const onlineName = candidates.find((name) => online.some((p) => p.toLowerCase() === name.toLowerCase()))
+        if (online.length <= threshold) {
+          const done = await applyTimeTarget(target)
+          if (!done.ok) return { ok: false, text: '改时间失败：' + done.text }
+          timeCooldown.set(actor, Date.now())
+          return {
+            ok: true,
+            text: '当前在线 ' + online.length + ' 人（≤' + threshold + '，不用投票），已把时间改成「' + target.name + '」。',
+          }
+        }
+        if (!onlineName) {
+          const who = !mine.length ? '你还没绑定游戏名' : '你绑定的游戏名（' + mine.join(', ') + '）现在都不在线'
+          return {
+            ok: false,
+            text: who + '，而当前在线 ' + online.length + ' 人（超过 ' + threshold + '），改时间需要游戏内投票。'
+              + '先进服并绑定，或者在游戏里直接说「改成白天」。',
+          }
+        }
+        const started = await startTimeVote({ target, by: actor, initiatorName: onlineName })
+        if (started.ok) timeCooldown.set(actor, Date.now())
+        return started
       }
 
       const isWindows = process.platform === 'win32'
@@ -1609,6 +2163,17 @@ export function apply(ctx, config) {
     // /mc-exchange 的会话只输出 JSON：工具在 agent setup 里已经尽量屏蔽，这里再兜底拒绝一次。
     if (exchangeSessionTask(id)) return '这个会话只输出 JSON，不能调用工具。'
     if (isLocalSession(id)) return undefined
+    // 白名单新玩家（游戏时长不足）：AI 只能聊天和查询，不能碰服务器
+    if (playtimeGatedSessions.has(id)) {
+      const gateArgs = exec.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
+      const readOnlyAction = exec.name === 'mc_server' && READ_ONLY_ACTIONS.includes(String(gateArgs.action || ''))
+      if (!readOnlyAction && !OPEN_READ_TOOLS.includes(exec.name)) {
+        const cfg = playtimeGateCfg()
+        const need = Math.round(Math.max(0, Number(cfg.minPlaytimeMinutes) || 60))
+        return '你绑定的游戏账号游戏时长还不到 ' + need + ' 分钟（白名单新玩家），暂时不能让小铜操作服务器；聊天和查询不受影响，先玩够时间再来。'
+      }
+      return undefined
+    }
     if (exec.name === 'mc_server') return undefined
 
     const args = exec.arguments && typeof exec.arguments === 'object' ? exec.arguments : {}
@@ -1791,8 +2356,20 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (req.method === 'GET') {
       const opsPath = join(paths.serverDir, 'ops')
       const owners = readOwnersList(opsPath)
-      if (desc) return send(200, { ns: String(desc.ns), value: desc.value, revision: desc.revision, via: 'settings', owners, bridgeState: readBridgeState() })
-      return send(200, { ns: '', value: fallbackConfig.get(), revision: 0, via: 'memory', owners, bridgeState: readBridgeState() })
+      if (desc) {
+        // 更新后配置行可能在、但值是默认值：用备份顶回去，别让面板显示默认值后一保存就覆盖掉。
+        const backup = readConfigBackup(paths.serverDir)
+        const descValue = backup && isDefaultPluginConfig(desc.value) && !isDefaultPluginConfig(backup)
+          ? Object.assign({}, desc.value, backup)
+          : desc.value
+        return send(200, { ns: String(desc.ns), value: descValue, revision: desc.revision, via: 'settings', owners, bridgeState: readBridgeState(), whitelistState: readWhitelistState(paths.serverDir) })
+      }
+      // 找不到配置条目时用「内存 + 备份」兜底：更新插件后条目可能暂时缺失，
+      // 不能让面板显示成一堆默认值（用户一保存就真把默认值写回去了）。
+      const backup = readConfigBackup(paths.serverDir)
+      const whitelistState = readWhitelistState(paths.serverDir)
+      const fallbackValue = backup ? Object.assign({}, fallbackConfig.get(), backup) : fallbackConfig.get()
+      return send(200, { ns: '', value: fallbackValue, revision: 0, via: 'memory', owners, bridgeState: readBridgeState(), whitelistState })
     }
     if (req.method !== 'POST') return send(405, { error: '只支持 GET / POST' })
 
@@ -1826,10 +2403,15 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
     if (body && body.bridge && typeof body.bridge.groups === 'string') {
       body.bridge.groups = body.bridge.groups.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
     }
+    // 免门槛游戏名同理
+    if (body && body.ai && typeof body.ai.trustedPlayers === 'string') {
+      body.ai.trustedPlayers = body.ai.trustedPlayers.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean)
+    }
 
     if (desc) {
       await settings.update(desc.ns, body, desc.revision)
       fallbackConfig.set(body)
+      saveConfigBackupSafe(body)
       writeWeatherConfig(paths.serverDir, (body && body.weather) || (fallbackConfig.get() || {}).weather)
       return send(200, { ok: true, via: 'settings' })
     }
@@ -1843,6 +2425,7 @@ async function handleConfigRoute(req, res, services, fallbackConfig) {
       if (entry) {
         await editor.edit(entry, (current) => Object.assign({}, current || {}, body))
         fallbackConfig.set(body)
+        saveConfigBackupSafe(body)
         writeWeatherConfig(paths.serverDir, (body && body.weather) || (fallbackConfig.get() || {}).weather)
         return send(200, { ok: true, via: 'configEditor' })
       }
@@ -1958,6 +2541,7 @@ function renderAbilities() {
   return [
     '## 服务器操作能力（mc_server 工具，参数 action + actor）',
     '- 改天气：action=weather，arg 为 clear / rain / thunder（也可写 晴天 / 下雨 / 雷雨）。',
+    '- 改时间：action=time，arg 为 day / noon / sunset / night / midnight / sunrise（也可写 白天 / 夜晚 / 中午 / 午夜…）。默认在设置里关闭；开启后规则和天气一样。',
     '  **所有玩家都能用，不要回复「只有服主能做」**。玩家需要先用 bind-player 绑定游戏名并且当前在游戏里；',
     '  服主/控制台直接执行。在线 ≤2 人直接生效，≥3 人时游戏内会广播投票（其他玩家输入 /vote yes）。',
     '- 其它常用 action：status、players、logs、say、gamemode、my-players、bind-player、vote-start / vote-approve / vote-status。',
@@ -1974,3 +2558,5 @@ function renderPersona(persona) {
   lines.push('说话像真人打字：短句、口语，别端着也别卖萌；问到服务器的事就照实答，不确定就说不确定。')
   return lines.join('\n')
 }
+
+// touch 2026-11-21T19:33:31.3335385+08:00

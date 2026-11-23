@@ -1,17 +1,10 @@
 # dsh-mc-server-ops bundle patch
 #
 # 安装本包后，dsh 启动时会自动插入 mc-server-ops 插件行。
-# 所有配置都可以在「设置 → 插件」里改，这里的值只是初始默认。
+#
+# 这里刻意不写 config：所有默认值都由插件的 Config schema（Schemastery）提供。
+# 用户改过的配置保存在 profile 自己的 cordis.patch.yml 里；如果在这里写死一份
+# config，插件更新时包内补丁会重新下发，把用户配置覆盖回默认值。
 - insert:
     - id: mc-server-ops
       name: dsh-mc-server-ops
-      config:
-        server:
-          dir: ''
-          rconPort: 25575
-          rconPassword: ''
-        persona:
-          enabled: true
-          name: 小铜
-          text: ''
-          scope: qq

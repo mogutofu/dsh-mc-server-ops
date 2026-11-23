@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.1 — 2026-11-23
+
+- feat: 新增「游戏内时间投票」（`time.*`，**默认关闭**）：规则照搬天气投票——服主/控制台直接执行；玩家发起时在线人数 ≤ `directThreshold`（默认 2）直接生效，人多则在游戏聊天栏发起投票，其他玩家发「同意 / 反对」，发起人自动算 1 票，`rejectNeed` 票反对即作废，`timeoutSeconds` 到点过期，同一玩家 `cooldownSeconds` 内不能重复发起。由插件自己实现（读日志 + RCON），**不需要 mod 配合**
+- feat: `mc_server` 新增 `time` 动作，arg 支持 `day` / `noon` / `sunset` / `night` / `midnight` / `sunrise` 以及中文（白天 / 中午 / 日落 / 夜晚 / 午夜 / 日出），也接受 0–24000 的 tick 数
+- fix: **插件更新不再把用户配置重置成默认值**。三个改动：① 包内 `cordis.patch.yml` 不再写死 `config` 默认值（默认值只来自 Config schema）；② 每次保存/启动把当前配置备份到 `ops/data/config-backup.json`；③ 启动时若发现配置「完全等于 schema 默认值」而备份里有用户配置，自动用备份恢复；面板读不到配置条目时也用备份兜底，避免误把默认值写回去
+- feat: 白名单新玩家限制（`ai.playtimeGate` 默认**开启**，`ai.minPlaytimeMinutes` 默认 60）：服务器开着白名单时，已绑定游戏账号但累计游戏时长不足门槛的玩家，可以正常和小铜聊天，但**不能让小铜执行任何服务器操作**（`mc_server` 的写操作、文件工具都拒绝；查询类动作放行）。时长从 `world/stats/<uuid>.json` 的 `minecraft:play_time` 读，按玩家绑定的游戏账号里时长最长的一个算。**服主豁免**：游戏名绑到 `owners.json` 里任何一个 QQ 的，不看绑定、不看时长，直接放行
+- feat: 设置面板新增「白名单」分组（放在靠前的显眼位置）：显示当前是否开启、名单人数、是否强制踢人，并把「白名单新玩家 AI 限制 / 游戏时长门槛 / 免门槛游戏名」从 AI 分组挪到这里；同时新增「游戏内时间投票」和「游戏内 AI（/ai）」两个分组
+- fix: 游戏时长门槛失效——名字→UUID 之前只查 `usercache.json`（滚动缓存，只留最近登录的几个人），老玩家/新号的号查不到就被当成「无法判断」放行。改成优先查 `whitelist.json`，再退回 `usercache.json` / `ops.json`\n- fix: **QQ 侧未绑定的号完全不受限**——`mc_server` 的时长拦截只查「已绑定」的 QQ，没绑定就直接放行。现在白名单开启时，**未绑定 / 查不到时长 / 时长不足** 三种情况都拦（服主仍豁免），提示文案按原因区分（未绑定 → 先用 bind-player；查不到 → 确认进过服）；判定写 `mc-ai.log` 的 `[gate]` 行\n- fix: **没绑定游戏名的号也能绕过门槛**——`/mc-ai` 请求里带 UUID，之前只用玩家名查时长，没绑定就查不到。现在优先按请求里的 UUID 直接读 `world/stats/<uuid>.json`，没玩过（或没有统计文件）就按 0 分钟算，未绑定玩家同样会被拦\n- fix: 时间投票的几个边界——`approveNeed=1` 时发起人一票立即通过（之前会等到超时）；游戏内广播失败时回滚投票并报错；投票词收紧为只认「同意 / 赞成 / ✓」和「反对 / 拒绝 / ✗」，避免正常聊天里的「好的」「1」「不行」被误计票
+- fix: 拿不到在线人数（`players` 失败）时直接报错，不再当成 0 人从而绕过投票（时间、天气两条路径都改）
+- fix: 游戏时长门槛填 0 时被当成 60——现在 0 就是关掉
+- fix: 统计目录跟随 `server.properties` 的 `level-name`（不再写死 `world`），并兼容 1.12.2 的 `stat.playOneMinute`
+- fix: `/mc-ai` 只有 uuid 是合法 UUID 时才按 uuid 读时长，否则退回按玩家名查，避免旧客户端被误判成 0 分钟
+- fix: 配置备份剔除 `rconPassword` / `appSecret` / `clientApiKey`（备份在服务器目录里，玩家用 read 能看到）
+- fix: 配置被重置后，面板 GET 会用备份顶回去；保存「全默认值」时不会覆盖非默认备份，避免误操作永久丢配置
+- fix: `liveConfig` 补齐 `permissions` / `vote`，面板兜底时不会丢整段
+- fix: 本机会话（`LOCAL-CONSOLE`）不做 QQ 时长门槛；游戏内 `/ai` 可直接用玩家名发起时间投票（不再要求先绑定 QQ）
+- known: 仍未覆盖——QQ 群会话的文件类工具（`write`/`edit`/`present`）没有按 actor 做时长门槛（需要会话→QQ 映射）；`adapter=panel` 和非 Windows 下时间投票仍走本机 PowerShell，不可用；手动把所有配置改回默认后，启动时会被备份顶回去（无「用户主动重置」标记）（时间参数解析、游戏时长门槛、配置备份恢复），`npm run check` 覆盖
+- 兼容性：`time.enabled=false`（默认）时行为与 0.7.0 完全一致；新增的 `ai.playtimeGate` 只在白名单开启且玩家绑定了账号时才可能生效
 版本号对应 git tag `vX.Y.Z`。
 
 ## 0.7.0 — 2026-11-21

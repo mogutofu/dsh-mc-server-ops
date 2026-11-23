@@ -72,6 +72,7 @@ window.__ModuleLoader__.load({
 			const [bridgeState, setBridgeState] = react.useState(null)
 			const [newOwner, setNewOwner] = react.useState("")
 			const [upd, setUpd] = react.useState({ checking: true, info: null, busy: false, msg: "" })
+			const [whitelistState, setWhitelistState] = react.useState(null)
 
 			react.useEffect(() => {
 				void load()
@@ -127,6 +128,7 @@ window.__ModuleLoader__.load({
 					if (!res.ok) return
 					const data = await res.json()
 					if (data && data.bridgeState) setBridgeState(data.bridgeState)
+					if (data && data.whitelistState) setWhitelistState(data.whitelistState)
 				} catch (err) { /* 状态刷不出来不影响编辑 */ }
 			}
 
@@ -196,6 +198,22 @@ window.__ModuleLoader__.load({
 							maxPerMinute: (v.exchange || {}).maxPerMinute ?? 30,
 							maxContextChars: (v.exchange || {}).maxContextChars ?? 20000,
 						},
+						time: {
+							enabled: (v.time || {}).enabled === true,
+							directThreshold: (v.time || {}).directThreshold ?? 2,
+							approveNeed: (v.time || {}).approveNeed ?? 2,
+							rejectNeed: (v.time || {}).rejectNeed ?? 1,
+							timeoutSeconds: (v.time || {}).timeoutSeconds ?? 60,
+							cooldownSeconds: (v.time || {}).cooldownSeconds ?? 60,
+						},
+						ai: {
+							enabled: (v.ai || {}).enabled !== false,
+							port: (v.ai || {}).port ?? 8765,
+							timeoutSeconds: (v.ai || {}).timeoutSeconds ?? 60,
+							playtimeGate: (v.ai || {}).playtimeGate !== false,
+							minPlaytimeMinutes: (v.ai || {}).minPlaytimeMinutes ?? 60,
+							trustedPlayers: Array.isArray((v.ai || {}).trustedPlayers) ? (v.ai || {}).trustedPlayers.join(', ') : '',
+						},
 						permissions: {
 							voteEscalation: (v.permissions || {}).voteEscalation !== false,
 							kubejsEdit: (v.permissions || {}).kubejsEdit !== false,
@@ -209,6 +227,7 @@ window.__ModuleLoader__.load({
 						},
 					})
 					setOwners(Array.isArray(data.owners) ? data.owners : [])
+					setWhitelistState(data.whitelistState || null)
 					setBridgeState(data.bridgeState || null)
 					setStatus({ loading: false, error: "", saved: "", saving: false })
 				} catch (err) {
@@ -241,6 +260,9 @@ window.__ModuleLoader__.load({
 			}
 			function patchWeather(key, value) {
 				setForm((prev) => (prev ? Object.assign({}, prev, { weather: Object.assign({}, prev.weather, { [key]: value }) }) : prev))
+			}
+			function patchTime(key, value) {
+				setForm((prev) => (prev ? Object.assign({}, prev, { time: Object.assign({}, prev.time, { [key]: value }) }) : prev))
 			}
 
 			async function save() {
@@ -357,6 +379,23 @@ window.__ModuleLoader__.load({
 							h("option", { value: "none" }, "关闭人设注入"))),
 				),
 				h("div", null,
+					h("div", { style: titleStyle }, "白名单"),
+					h("div", { style: hintStyle }, "白名单本身由 server.properties 的 white-list 控制；这里显示当前状态，并配置「新玩家 AI 限制」。要一键把绑定名单同步进白名单并开启，用 mc_server 的 whitelist-sync（仅服主）。"),
+				),
+				h("div", { style: groupStyle },
+					h("div", { style: Object.assign({}, hintStyle, { color: (whitelistState && whitelistState.enabled) ? "#3c9a5f" : "#d9534f" }) },
+						whitelistState
+							? ((whitelistState.enabled ? "● 白名单已开启" : "○ 白名单未开启")
+								+ " · 名单 " + whitelistState.count + " 人"
+								+ (whitelistState.enforce ? " · 强制踢出未入名单玩家" : ""))
+							: "白名单状态未知（点「重新读取」刷新）"),
+					h(Toggle, { label: "白名单新玩家 AI 限制（默认开启）", value: form.ai.playtimeGate, onChange: (x) => patch("ai", "playtimeGate", x) }),
+					h(Field, { label: "游戏时长门槛（分钟）", hint: "白名单开启时，绑定玩家玩够这么久之前不能让小铜操作服务器；默认 60" },
+						h(NumberInput, { value: form.ai.minPlaytimeMinutes, onChange: (x) => patch("ai", "minPlaytimeMinutes", x) })),
+					h(Field, { label: "免门槛游戏名", hint: "逗号分隔。服主自己的号填这里，不看绑定、不看时长；绑定了服主 QQ 的号本来就不用填" },
+						h(TextInput, { value: form.ai.trustedPlayers, placeholder: "MoooGuuu", onChange: (x) => patch("ai", "trustedPlayers", x) })),
+				),
+				h("div", null,
 					h("div", { style: titleStyle }, "连接方式"),
 					h("div", { style: hintStyle }, "启停和后台指令走哪条路。服务器就在这台机器上选「本机」；托管在翼龙面板上选「Pterodactyl」。状态、日志这些只读操作不受影响。"),
 				),
@@ -428,6 +467,34 @@ window.__ModuleLoader__.load({
 						h(NumberInput, { value: form.weather.timeoutSeconds, onChange: (x) => patchWeather("timeoutSeconds", x) })),
 					h(Field, { label: "发起冷却（秒）", hint: "同一玩家两次 /weather 的最小间隔，默认 60 秒，0 = 不限" },
 						h(NumberInput, { value: form.weather.cooldownSeconds, onChange: (x) => patchWeather("cooldownSeconds", x) })),
+				),
+				h("div", null,
+					h("div", { style: titleStyle }, "游戏内时间投票"),
+					h("div", { style: hintStyle }, "默认关闭。开启后玩家可以要求改时间（白天 / 夜晚 / 中午 / 午夜…）：在线人少直接生效，人多在游戏聊天栏投票，其他玩家发「同意 / 反对」。由插件自己实现，不需要 mod。"),
+				),
+				h("div", { style: groupStyle },
+					h(Toggle, { label: "允许玩家投票改时间（默认关闭）", value: form.time.enabled, onChange: (x) => patchTime("enabled", x) }),
+					h(Field, { label: "在线不超过几人时直接生效", hint: "默认 2：0-2 人直接改；3 人及以上发起投票" },
+						h(NumberInput, { value: form.time.directThreshold, onChange: (x) => patchTime("directThreshold", x) })),
+					h(Field, { label: "投票需要几人同意", hint: "默认 2；发起人自动算 1 票同意" },
+						h(NumberInput, { value: form.time.approveNeed, onChange: (x) => patchTime("approveNeed", x) })),
+					h(Field, { label: "几人反对就作废", hint: "默认 1 = 一票否决" },
+						h(NumberInput, { value: form.time.rejectNeed, onChange: (x) => patchTime("rejectNeed", x) })),
+					h(Field, { label: "投票有效期（秒）", hint: "默认 60 秒；到点没结果自动作废" },
+						h(NumberInput, { value: form.time.timeoutSeconds, onChange: (x) => patchTime("timeoutSeconds", x) })),
+					h(Field, { label: "发起冷却（秒）", hint: "同一玩家两次发起的最小间隔，默认 60 秒，0 = 不限" },
+						h(NumberInput, { value: form.time.cooldownSeconds, onChange: (x) => patchTime("cooldownSeconds", x) })),
+				),
+				h("div", null,
+					h("div", { style: titleStyle }, "游戏内 AI（/ai）"),
+					h("div", { style: hintStyle }, "玩家在游戏里 /ai 内容 和小铜对话。白名单开启时，绑定游戏账号但时长不够的新玩家只能聊天，不能让小铜操作服务器（默认开启，门槛 60 分钟）。"),
+				),
+				h("div", { style: groupStyle },
+					h(Toggle, { label: "允许游戏内 /ai 对话", value: form.ai.enabled, onChange: (x) => patch("ai", "enabled", x) }),
+					h(Field, { label: "本地端口", hint: "mod 连接的端口，默认 8765（只监听 127.0.0.1）" },
+						h(NumberInput, { value: form.ai.port, onChange: (x) => patch("ai", "port", x) })),
+					h(Field, { label: "等待回复超时（秒）", hint: "默认 60 秒" },
+						h(NumberInput, { value: form.ai.timeoutSeconds, onChange: (x) => patch("ai", "timeoutSeconds", x) })),
 				),
 				h("div", null,
 					h("div", { style: titleStyle }, "AI 市场接口（AIMCmarket）"),

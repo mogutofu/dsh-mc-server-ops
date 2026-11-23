@@ -121,6 +121,12 @@ dsh plugin add /path/to/dsh-mc-server-ops
 | `weather.approveNeed` / `weather.rejectNeed` | `2` / `1` | 通过需要几票同意 / 几票反对作废（发起人自动算 1 票同意） |
 | `weather.timeoutSeconds` | `60` | 投票有效期（秒） |
 | `weather.cooldownSeconds` | `60` | 同一玩家两次发起的最小间隔（秒） |
+| `time.enabled` | `false` | 允许玩家投票改游戏时间（插件自己实现，**不需要 mod**；默认关闭） |
+| `time.directThreshold` | `2` | 在线 ≤ 这个数直接改时间，更多人才发起游戏内投票 |
+| `time.approveNeed` / `time.rejectNeed` | `2` / `1` | 通过需要几票同意 / 几票反对作废（发起人自动算 1 票同意） |
+| `time.timeoutSeconds` / `time.cooldownSeconds` | `60` / `60` | 投票有效期 / 同一玩家两次发起的最小间隔（秒） |
+| `ai.playtimeGate` | `true` | 白名单开启时，绑定玩家游戏时长不足门槛前禁止让小铜操作服务器（聊天和查询不受影响；**服主豁免**） |
+| `ai.minPlaytimeMinutes` | `60` | 游戏时长门槛（分钟），按玩家绑定账号里时长最长的一个算 |
 
 ## 目录结构
 
